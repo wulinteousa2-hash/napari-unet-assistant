@@ -152,3 +152,8 @@ Default:
 - pair report CSV
 - prediction TIFF outputs
 
+## Reference
+
+This project builds on U-Net-based nerve morphometry workflows described in:
+
+Moiseev D, Hu B, Li J. Morphometric Analysis of Peripheral Myelinated Nerve Fibers through Deep Learning. *Journal of the Peripheral Nervous System*. 2019;24(1):87-93. https://pmc.ncbi.nlm.nih.gov/articles/PMC6420354/

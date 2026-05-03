@@ -1,6 +1,6 @@
 name: napari-unet-assistant
 display_name: U-Net Assistant
-description: a napari plugin for TIFF-based 2D and 3D U-Net segmentation workflows. environment
+description: a napari plugin for TIFF-based 2D and 3D U-Net segmentation workflows. 
 visibility: public
 
 contributions:

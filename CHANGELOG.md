@@ -1,5 +1,32 @@
-```markdown
 # Changelog
+
+## 0.2.0 - Smart pairing update
+
+### Added
+
+- Added smarter image-mask pairing for supervised U-Net training datasets.
+- Added auto pairing mode.
+- Added support for one-folder mixed datasets containing both images and masks.
+- Added manual CSV pairing with `image_path` and `mask_path` columns.
+- Added optional `key` column support for manual CSV pairing.
+- Added `_1` / `_2` pairing support, where `_1` is treated as image and `_2` as mask.
+- Added expanded mask-name detection, including `_mask`, `_m`, `_label`, `_labels`, `_seg`, `_annotation`, `_gt`, `_groundtruth`, `_binary`, and related terms.
+- Added expanded image-name detection, including `_image`, `_img`, `_raw`, `_input`, `_source`, `_ch0`, and related terms.
+- Added pair confidence scoring.
+- Added pairing reason reporting.
+- Added image/mask shape quick-check during pair scanning.
+- Added reporting for ambiguous, unmatched, rejected, and shape-mismatched files.
+- Added saved pairing reports, including `pairs.csv`, `unmatched_images.csv`, `unmatched_masks.csv`, and `pairing_warnings.csv`.
+
+### Changed
+
+- Improved dataset pairing from simple suffix matching to a reviewable smart-pairing workflow.
+- Updated README to clarify supported pairing modes, CSV format, and validation status.
+
+### Notes
+
+- K-fold controls may exist in the UI/config, but k-fold training is not active in this release.
+- This version remains focused on TIFF-based supervised U-Net training and inference.
 
 ## 0.1.0 - Initial public release
 
@@ -36,6 +63,6 @@
 
 ### Notes
 
-- This version is focused on TIFF-first supervised U-Net training and inference.
-- The public plugin/project name is now `napari-unet-assistant`.
-- SAM-assisted annotation and persistent SAM-to-U-Net project workflows are intentionally outside 
+- This version focused on TIFF-first supervised U-Net training and inference.
+- The public plugin/project name became `napari-unet-assistant`.
+- SAM-assisted annotation and persistent SAM-to-U-Net project workflows were intentionally outside this release.

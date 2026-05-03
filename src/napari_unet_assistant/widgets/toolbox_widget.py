@@ -20,7 +20,12 @@ from ..inference.predictor import (
     predict_folder_from_run_folder,
 )
 from ..io.loaders import ensure_numpy, load_image_any
-from ..io.pairing import pair_image_mask_folders
+from ..io.pairing import (
+    pair_auto,
+    pair_image_mask_folders,
+    pair_mixed_folder,
+    pair_from_csv,
+)
 from ..io.writers import ensure_dir, save_csv_rows, save_json, save_tiff
 from ..training.trainer import TrainConfig
 from ..utils.config import RunConfig
@@ -287,18 +292,44 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     )
     data_layout = QFormLayout()
 
+    pairing_mode_combo = QComboBox()
+    pairing_mode_combo.addItems([
+        "Auto smart pairing",
+        "Two folders: images + masks",
+        "One folder: mixed images/masks",
+        "Manual CSV",
+    ])
+
+    dataset_dir_edit = QLineEdit()
     image_dir_edit = QLineEdit()
     mask_dir_edit = QLineEdit()
+    csv_pairing_edit = QLineEdit()
     output_dir_edit = QLineEdit()
 
+    btn_browse_dataset_dir = QPushButton("Browse dataset folder")
     btn_browse_image_dir = QPushButton("Browse image folder")
     btn_browse_mask_dir = QPushButton("Browse mask folder")
+    btn_browse_csv_pairing = QPushButton("Browse CSV")
     btn_browse_output_dir = QPushButton("Browse output folder")
     btn_scan_pairs = QPushButton("Scan pairs")
     btn_load_selected_pair = QPushButton("Load selected pair(s) into napari")
 
+    validate_shapes_chk = QCheckBox("Quick-check image/mask shapes during scan")
+    validate_shapes_chk.setChecked(True)
+
+    pair_summary_label = QLabel("No pair scan yet.")
+    pair_summary_label.setStyleSheet(
+        "QLabel { background-color: #273344; color: white; padding: 4px; font-weight: bold; }"
+    )
+
     pair_list = QListWidget()
     pair_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+
+    row_dataset = QWidget()
+    row_dataset_l = QHBoxLayout(row_dataset)
+    row_dataset_l.setContentsMargins(0, 0, 0, 0)
+    row_dataset_l.addWidget(dataset_dir_edit)
+    row_dataset_l.addWidget(btn_browse_dataset_dir)
 
     row_img = QWidget()
     row_img_l = QHBoxLayout(row_img)
@@ -312,17 +343,28 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     row_msk_l.addWidget(mask_dir_edit)
     row_msk_l.addWidget(btn_browse_mask_dir)
 
+    row_csv = QWidget()
+    row_csv_l = QHBoxLayout(row_csv)
+    row_csv_l.setContentsMargins(0, 0, 0, 0)
+    row_csv_l.addWidget(csv_pairing_edit)
+    row_csv_l.addWidget(btn_browse_csv_pairing)
+
     row_out = QWidget()
     row_out_l = QHBoxLayout(row_out)
     row_out_l.setContentsMargins(0, 0, 0, 0)
     row_out_l.addWidget(output_dir_edit)
     row_out_l.addWidget(btn_browse_output_dir)
 
+    data_layout.addRow("Pairing mode:", pairing_mode_combo)
+    data_layout.addRow("Dataset folder:", row_dataset)
     data_layout.addRow("Images:", row_img)
     data_layout.addRow("Masks:", row_msk)
+    data_layout.addRow("Pair CSV:", row_csv)
     data_layout.addRow("Run output:", row_out)
+    data_layout.addRow(validate_shapes_chk)
     data_layout.addRow(btn_scan_pairs)
-    data_layout.addRow("Paired files:", pair_list)
+    data_layout.addRow("Summary:", pair_summary_label)
+    data_layout.addRow("Paired files quick-check:", pair_list)
     data_layout.addRow(btn_load_selected_pair)
     g_data.set_content_layout(data_layout)
 
@@ -679,33 +721,131 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     infer_mode_combo.currentTextChanged.connect(_sync_infer_ui)
     training_mode_combo.currentTextChanged.connect(_sync_training_mode_ui)
 
+    def _sync_pairing_ui():
+        mode = pairing_mode_combo.currentText()
+        is_auto = mode == "Auto smart pairing"
+        is_two = mode == "Two folders: images + masks"
+        is_one = mode == "One folder: mixed images/masks"
+        is_csv = mode == "Manual CSV"
+
+        dataset_dir_edit.setEnabled(is_auto or is_one)
+        btn_browse_dataset_dir.setEnabled(is_auto or is_one)
+
+        image_dir_edit.setEnabled(is_auto or is_two)
+        btn_browse_image_dir.setEnabled(is_auto or is_two)
+        mask_dir_edit.setEnabled(is_auto or is_two)
+        btn_browse_mask_dir.setEnabled(is_auto or is_two)
+
+        csv_pairing_edit.setEnabled(is_csv)
+        btn_browse_csv_pairing.setEnabled(is_csv)
+
+    pairing_mode_combo.currentTextChanged.connect(_sync_pairing_ui)
+
     _sync_mode_ui()
     _sync_task_ui()
     _sync_infer_ui()
     _sync_training_mode_ui()
+    _sync_pairing_ui()
+
+    def _pair_status_icon(status: str) -> str:
+        if status == "ok":
+            return "OK"
+        if status == "ambiguous":
+            return "WARN"
+        if status == "shape_mismatch":
+            return "FAIL"
+        return "CHECK"
+
+    def _pair_row_text(rec) -> str:
+        img_name = Path(rec.image_path).name
+        msk_name = Path(rec.mask_path).name
+        shape_txt = ""
+        if getattr(rec, "image_shape", "") or getattr(rec, "mask_shape", ""):
+            shape_txt = f" | shape {rec.image_shape} -> {rec.mask_shape}"
+        return (
+            f"{_pair_status_icon(rec.status)} | {rec.key} | "
+            f"conf={rec.confidence} | {img_name} -> {msk_name}"
+            f"{shape_txt} | {rec.reason}"
+        )
 
     def scan_pairs():
+        mode = pairing_mode_combo.currentText()
+        dataset_dir = dataset_dir_edit.text().strip()
         image_dir = image_dir_edit.text().strip()
         mask_dir = mask_dir_edit.text().strip()
-        if not image_dir or not mask_dir:
-            show_warning("Choose image folder and mask folder first.")
+        csv_path = csv_pairing_edit.text().strip()
+        validate_shapes = bool(validate_shapes_chk.isChecked())
+
+        try:
+            if mode == "Auto smart pairing":
+                report = pair_auto(
+                    dataset_dir=dataset_dir or None,
+                    image_dir=image_dir or None,
+                    mask_dir=mask_dir or None,
+                    validate_shapes=validate_shapes,
+                )
+            elif mode == "Two folders: images + masks":
+                if not image_dir or not mask_dir:
+                    raise ValueError("Choose image folder and mask folder first.")
+                report = pair_image_mask_folders(
+                    image_dir,
+                    mask_dir,
+                    validate_shapes=validate_shapes,
+                )
+            elif mode == "One folder: mixed images/masks":
+                if not dataset_dir:
+                    raise ValueError("Choose a dataset folder first.")
+                report = pair_mixed_folder(
+                    dataset_dir,
+                    validate_shapes=validate_shapes,
+                )
+            else:
+                if not csv_path:
+                    raise ValueError("Choose a pair CSV first.")
+                report = pair_from_csv(csv_path, validate_shapes=validate_shapes)
+        except Exception as e:
+            show_warning(str(e))
+            log(f"Pair scan failed: {e}")
             return
 
-        report = pair_image_mask_folders(image_dir, mask_dir)
         state["pair_report"] = report
 
         pair_list.clear()
+        usable = 0
         for rec in report.pairs:
-            pair_list.addItem(f"{rec.key} | {Path(rec.image_path).name} | {Path(rec.mask_path).name}")
+            pair_list.addItem(_pair_row_text(rec))
+            if rec.status == "ok":
+                usable += 1
 
-        log(f"Pairs found: {len(report.pairs)}")
-        log(f"Unmatched images: {len(report.unmatched_images)}")
-        log(f"Unmatched masks: {len(report.unmatched_masks)}")
+        summary = (
+            f"Mode: {getattr(report, 'mode_used', mode)} | "
+            f"usable OK pairs: {usable} | all pairs: {len(report.pairs)} | "
+            f"ambiguous: {len(getattr(report, 'ambiguous', []))} | "
+            f"rejected: {len(getattr(report, 'rejected', []))} | "
+            f"unmatched images: {len(report.unmatched_images)} | "
+            f"unmatched masks: {len(report.unmatched_masks)}"
+        )
+        pair_summary_label.setText(summary)
+
+        log(summary)
+        for x in getattr(report, "ambiguous", [])[:20]:
+            log(f"Ambiguous: {x}")
+        for x in getattr(report, "rejected", [])[:20]:
+            log(f"Rejected: {x}")
 
         if output_dir_edit.text().strip():
             out_dir = ensure_dir(output_dir_edit.text().strip())
-            rows = [[p.key, p.image_path, p.mask_path] for p in report.pairs]
-            save_csv_rows(out_dir / "pairs.csv", ["key", "image_path", "mask_path"], rows)
+            rows = [[
+                p.key, p.image_path, p.mask_path,
+                getattr(p, "status", ""), getattr(p, "confidence", ""),
+                getattr(p, "reason", ""), getattr(p, "image_shape", ""),
+                getattr(p, "mask_shape", ""), getattr(p, "shape_ok", ""),
+            ] for p in report.pairs]
+            save_csv_rows(
+                out_dir / "pairs.csv",
+                ["key", "image_path", "mask_path", "status", "confidence", "reason", "image_shape", "mask_shape", "shape_ok"],
+                rows,
+            )
 
             rows_img = [[x] for x in report.unmatched_images]
             save_csv_rows(out_dir / "unmatched_images.csv", ["image_path"], rows_img)
@@ -713,7 +853,14 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             rows_msk = [[x] for x in report.unmatched_masks]
             save_csv_rows(out_dir / "unmatched_masks.csv", ["mask_path"], rows_msk)
 
-        show_info("Pair scan complete.")
+            save_csv_rows(
+                out_dir / "pairing_warnings.csv",
+                ["type", "message"],
+                [["ambiguous", x] for x in getattr(report, "ambiguous", [])] +
+                [["rejected", x] for x in getattr(report, "rejected", [])],
+            )
+
+        show_info("Pair scan complete. Review paired files before training.")
 
     def load_selected_pair():
         report = state["pair_report"]
@@ -861,7 +1008,11 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         current_pairs = [
             {"key": p.key, "image_path": p.image_path, "mask_path": p.mask_path}
             for p in report.pairs
+            if getattr(p, "status", "ok") == "ok"
         ]
+
+        if not current_pairs:
+            raise ValueError("No usable OK pairs selected. Review the pairing result table first.")
 
         if training_mode_combo.currentText() == "new training":
             return current_pairs
@@ -1378,8 +1529,16 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             show_warning(str(e))
             infer_log(f"Start inference failed: {e}")
 
+    btn_browse_dataset_dir.clicked.connect(lambda: browse_dir(dataset_dir_edit))
     btn_browse_image_dir.clicked.connect(lambda: browse_dir(image_dir_edit))
     btn_browse_mask_dir.clicked.connect(lambda: browse_dir(mask_dir_edit))
+
+    def browse_csv_file(line_edit: QLineEdit):
+        f, _ = QFileDialog.getOpenFileName(root, "Select pair CSV", "", "CSV (*.csv)")
+        if f:
+            line_edit.setText(f)
+
+    btn_browse_csv_pairing.clicked.connect(lambda: browse_csv_file(csv_pairing_edit))
     btn_browse_output_dir.clicked.connect(lambda: browse_dir(output_dir_edit))
     btn_scan_pairs.clicked.connect(scan_pairs)
     btn_load_selected_pair.clicked.connect(load_selected_pair)

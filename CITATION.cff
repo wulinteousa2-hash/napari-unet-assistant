@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use napari-unet-assistant in your work, please cite it using this metadata."
+type: software
+title: "napari-unet-assistant"
+version: "0.2.0"
+date-released: "2026-05-03"
+authors:
+  - family-names: "Teo"
+    given-names: "Wulin"
+    orcid: "https://orcid.org/0000-0001-7815-7014"
+repository-code: "https://github.com/wulinteousa2-hash/napari-unet-assistant"
+url: "https://github.com/wulinteousa2-hash/napari-unet-assistant"
+license: "MIT"
+keywords:
+  - "napari"
+  - "unet"
+  - "deep learning"
+    "semantic segmentation"
+  - "microscopy"
+  - "image analysis"
+abstract: "A napari plugin supervised 2D and 3D U-Net segmentation workflows ."

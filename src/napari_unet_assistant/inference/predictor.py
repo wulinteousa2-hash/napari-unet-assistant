@@ -7,7 +7,8 @@ import torch
 
 from ..io.loaders import ensure_numpy, load_image_any
 from ..io.writers import load_json, save_tiff
-from ..models.unet import UNet2D, UNet3D
+from ..models.registry import build_model_from_config
+from ..training.patching import iter_patch_starts_2d, iter_patch_starts_3d
 from ..utils.array_utils import normalize_zero_one, rgb_to_gray_if_needed
 
 
@@ -23,13 +24,7 @@ def load_model_from_run_folder(run_dir: str | Path, device: str | None = None):
     run_dir = Path(run_dir)
     cfg = load_json(run_dir / "config.json")
 
-    mode = cfg["mode_2d_or_3d"]
-    out_channels = int(cfg["out_channels"])
-
-    if mode == "2d":
-        model = UNet2D(in_channels=1, out_channels=out_channels)
-    else:
-        model = UNet3D(in_channels=1, out_channels=out_channels)
+    model = build_model_from_config(cfg)
 
     ckpt = torch.load(run_dir / "best_model.pt", map_location=device or "cpu")
     model.load_state_dict(ckpt)
@@ -56,7 +51,14 @@ def _predict_full_2d(model, image: np.ndarray, task_type: str, device: str):
 
 
 @torch.no_grad()
-def _predict_tiled_2d(model, image: np.ndarray, task_type: str, device: str, patch_xy: int):
+def _predict_tiled_2d(
+    model,
+    image: np.ndarray,
+    task_type: str,
+    device: str,
+    patch_xy: int,
+    overlap_percent: int = 0,
+):
     x = rgb_to_gray_if_needed(image)
     x = normalize_zero_one(x).astype(np.float32)
 
@@ -71,33 +73,23 @@ def _predict_tiled_2d(model, image: np.ndarray, task_type: str, device: str, pat
         accum = np.zeros((out_channels, H, W), dtype=np.float32)
         count = np.zeros((H, W), dtype=np.float32)
 
-    ys = list(range(0, max(H - p + 1, 1), p))
-    xs = list(range(0, max(W - p + 1, 1), p))
-    if len(ys) == 0 or ys[-1] != max(H - p, 0):
-        ys.append(max(H - p, 0))
-    if len(xs) == 0 or xs[-1] != max(W - p, 0):
-        xs.append(max(W - p, 0))
+    starts = list(iter_patch_starts_2d((H, W), p, int(overlap_percent)))
+    if not starts:
+        return _predict_full_2d(model, image, task_type, device)
 
-    seen = set()
-    for y0 in ys:
-        for x0 in xs:
-            key = (y0, x0)
-            if key in seen:
-                continue
-            seen.add(key)
+    for y0, x0 in starts:
+        patch = x[y0:y0 + p, x0:x0 + p]
+        t = torch.from_numpy(patch[None, None, ...]).to(device)
+        logits = model(t)
 
-            patch = x[y0:y0 + p, x0:x0 + p]
-            t = torch.from_numpy(patch[None, None, ...]).to(device)
-            logits = model(t)
+        if task_type == "binary":
+            probs = torch.sigmoid(logits)[0, 0].cpu().numpy()
+            accum[y0:y0 + p, x0:x0 + p] += probs
+        else:
+            probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
+            accum[:, y0:y0 + p, x0:x0 + p] += probs
 
-            if task_type == "binary":
-                probs = torch.sigmoid(logits)[0, 0].cpu().numpy()
-                accum[y0:y0 + p, x0:x0 + p] += probs
-            else:
-                probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
-                accum[:, y0:y0 + p, x0:x0 + p] += probs
-
-            count[y0:y0 + p, x0:x0 + p] += 1.0
+        count[y0:y0 + p, x0:x0 + p] += 1.0
 
     if task_type == "binary":
         probs = accum / np.maximum(count, 1e-8)
@@ -121,7 +113,15 @@ def _predict_full_3d(model, image: np.ndarray, task_type: str, device: str):
 
 
 @torch.no_grad()
-def _predict_tiled_3d(model, image: np.ndarray, task_type: str, device: str, patch_z: int, patch_xy: int):
+def _predict_tiled_3d(
+    model,
+    image: np.ndarray,
+    task_type: str,
+    device: str,
+    patch_z: int,
+    patch_xy: int,
+    overlap_percent: int = 0,
+):
     x = normalize_zero_one(image.astype(np.float32))
     Z, Y, X = x.shape
 
@@ -133,41 +133,27 @@ def _predict_tiled_3d(model, image: np.ndarray, task_type: str, device: str, pat
         accum = np.zeros((out_channels, Z, Y, X), dtype=np.float32)
         count = np.zeros((Z, Y, X), dtype=np.float32)
 
-    step_z = int(patch_z)
-    step_xy = int(patch_xy)
+    starts = list(iter_patch_starts_3d(
+        (Z, Y, X),
+        (int(patch_z), int(patch_xy), int(patch_xy)),
+        int(overlap_percent),
+    ))
+    if not starts:
+        return _predict_full_3d(model, image, task_type, device)
 
-    zs = list(range(0, max(Z - patch_z + 1, 1), step_z))
-    ys = list(range(0, max(Y - patch_xy + 1, 1), step_xy))
-    xs = list(range(0, max(X - patch_xy + 1, 1), step_xy))
+    for z0, y0, x0 in starts:
+        patch = x[z0:z0 + patch_z, y0:y0 + patch_xy, x0:x0 + patch_xy]
+        t = torch.from_numpy(patch[None, None, ...]).to(device)
+        logits = model(t)
 
-    if len(zs) == 0 or zs[-1] != max(Z - patch_z, 0):
-        zs.append(max(Z - patch_z, 0))
-    if len(ys) == 0 or ys[-1] != max(Y - patch_xy, 0):
-        ys.append(max(Y - patch_xy, 0))
-    if len(xs) == 0 or xs[-1] != max(X - patch_xy, 0):
-        xs.append(max(X - patch_xy, 0))
+        if task_type == "binary":
+            probs = torch.sigmoid(logits)[0, 0].cpu().numpy()
+            accum[z0:z0 + patch_z, y0:y0 + patch_xy, x0:x0 + patch_xy] += probs
+        else:
+            probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
+            accum[:, z0:z0 + patch_z, y0:y0 + patch_xy, x0:x0 + patch_xy] += probs
 
-    seen = set()
-    for z0 in zs:
-        for y0 in ys:
-            for x0 in xs:
-                key = (z0, y0, x0)
-                if key in seen:
-                    continue
-                seen.add(key)
-
-                patch = x[z0:z0 + patch_z, y0:y0 + patch_xy, x0:x0 + patch_xy]
-                t = torch.from_numpy(patch[None, None, ...]).to(device)
-                logits = model(t)
-
-                if task_type == "binary":
-                    probs = torch.sigmoid(logits)[0, 0].cpu().numpy()
-                    accum[z0:z0 + patch_z, y0:y0 + patch_xy, x0:x0 + patch_xy] += probs
-                else:
-                    probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
-                    accum[:, z0:z0 + patch_z, y0:y0 + patch_xy, x0:x0 + patch_xy] += probs
-
-                count[z0:z0 + patch_z, y0:y0 + patch_xy, x0:x0 + patch_xy] += 1.0
+        count[z0:z0 + patch_z, y0:y0 + patch_xy, x0:x0 + patch_xy] += 1.0
 
     if task_type == "binary":
         probs = accum / np.maximum(count, 1e-8)
@@ -177,8 +163,11 @@ def _predict_tiled_3d(model, image: np.ndarray, task_type: str, device: str, pat
     return np.argmax(probs, axis=0).astype(np.uint8)
 
 
-def _auto_strategy(mode: str, image: np.ndarray) -> str:
+def _auto_strategy(mode: str, image: np.ndarray, cfg: dict | None = None) -> str:
     if mode == "2d":
+        patch_xy = int((cfg or {}).get("patch_xy") or 0)
+        if patch_xy > 0 and image.ndim == 2 and max(image.shape) > patch_xy:
+            return "tiled"
         return "full"
     # conservative for 3D
     voxels = int(np.prod(image.shape))
@@ -195,11 +184,12 @@ def _predict_with_model(model, cfg: dict, image: np.ndarray, device: str, strate
         if image.ndim != 2:
             raise ValueError(f"Expected 2D image for 2D model, got shape {image.shape}")
 
-        used_strategy = _auto_strategy(mode, image) if strategy == "auto" else strategy
+        used_strategy = _auto_strategy(mode, image, cfg) if strategy == "auto" else strategy
         if used_strategy == "tiled":
             pred = _predict_tiled_2d(
                 model, image, task_type, device,
                 patch_xy=int(cfg["patch_xy"]),
+                overlap_percent=int(cfg.get("overlap_percent", 0)),
             )
         else:
             pred = _predict_full_2d(model, image, task_type, device)
@@ -208,7 +198,7 @@ def _predict_with_model(model, cfg: dict, image: np.ndarray, device: str, strate
     if image.ndim != 3:
         raise ValueError(f"Expected 3D image for 3D model, got shape {image.shape}")
 
-    used_strategy = _auto_strategy(mode, image) if strategy == "auto" else strategy
+    used_strategy = _auto_strategy(mode, image, cfg) if strategy == "auto" else strategy
     if used_strategy == "full":
         pred = _predict_full_3d(model, image, task_type, device)
     else:
@@ -216,6 +206,7 @@ def _predict_with_model(model, cfg: dict, image: np.ndarray, device: str, strate
             model, image, task_type, device,
             patch_z=int(cfg["patch_z"]),
             patch_xy=int(cfg["patch_xy"]),
+            overlap_percent=int(cfg.get("overlap_percent", 0)),
         )
     return pred, used_strategy
 

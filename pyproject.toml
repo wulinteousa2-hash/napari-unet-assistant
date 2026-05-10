@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "napari-unet-assistant"
-version = "0.3.0"
+version = "0.4.0"
 description = "a napari plugin for TIFF-based 2D and 3D U-Net segmentation workflows."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,6 +34,12 @@ dependencies = [
     "torch",
     "torchvision",
 ]
+
+[project.optional-dependencies]
+monai = ["monai"]
+nnunet = ["nnunetv2"]
+smp = ["segmentation-models-pytorch"]
+models = ["monai", "nnunetv2", "segmentation-models-pytorch"]
 
 [project.urls]
 Homepage = "https://github.com/wulinteousa2-hash/napari-unet-assistant"

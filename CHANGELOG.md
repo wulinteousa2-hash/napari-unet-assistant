@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 - Training controls and recursive dataset pairing
+## 0.4.0 - Model registry and training workflow update
 
 ### Added
 
@@ -9,6 +9,10 @@
 - Added automatic selection of the best pairing strategy from recursive scan, two-subfolder scan, and mixed-folder scan results.
 - Added configurable augmentation presets: `none`, `conservative`, `balanced`, and `strong`.
 - Added custom augmentation controls for horizontal and vertical flips, rotation, shear, scale, brightness jitter, and Gaussian noise.
+- Added model-capacity options for standard, large, and xlarge U-Net widths.
+- Added a model registry with provider modules for built-in U-Net, MONAI, nnU-Net, and segmentation-models-pytorch backends.
+- Added separate model-family, backbone/encoder, and encoder-weight controls for comparing U-Net variants more clearly.
+- Added optional install extras for `monai`, `nnunet`, `smp`, and `models`.
 - Added saving and loading of augmentation settings in run configuration metadata.
 - Added a training stop button that requests cancellation, discards the interrupted model state, and clears GPU cache when available.
 - Added a U-Net architecture preview for the selected 2D/3D mode and output-channel configuration.
@@ -20,6 +24,9 @@
 - Improved role-suffix stripping so repeated trailing role tokens can be removed from filenames before matching.
 - Reworked the training panel into clearer tabs and more stable Qt sizing so controls fit better in the dock widget.
 - Replaced the fixed conservative augmentation path with configuration-driven augmentation used by both 2D and 3D datasets.
+- Updated inference loading so checkpoints are restored with the saved U-Net base-channel width.
+- Updated training and inference to rebuild models through the registry from saved backend/model metadata.
+- Clarified validation behavior by keeping split validation as the active mode and writing `validation.json` for each run.
 - Improved training startup and shutdown handling by releasing old model memory before a new run and after cancellation or errors.
 
 ### Notes

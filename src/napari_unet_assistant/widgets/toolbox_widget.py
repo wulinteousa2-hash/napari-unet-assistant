@@ -30,6 +30,7 @@ from ..io.pairing import (
     pair_from_csv,
 )
 from ..io.writers import ensure_dir, save_csv_rows, save_json, save_tiff
+from ..models.registry import default_model_name, model_spec, model_specs_for_backend
 from ..training.augment import AugmentationConfig
 from ..training.trainer import TrainConfig
 from ..utils.config import RunConfig
@@ -129,15 +130,107 @@ def _mirror_text_as_tooltip(line_edit: QLineEdit):
     line_edit.textChanged.connect(line_edit.setToolTip)
 
 
-def _unet_architecture_summary(mode: str, in_channels: int, out_channels: int) -> str:
-    base = 32 if mode == "2d" else 16
+def _estimate_unet_params_2d(in_channels: int, out_channels: int, base: int) -> int:
+    def conv(in_ch: int, out_ch: int, k: int = 3) -> int:
+        return out_ch * in_ch * k * k + out_ch
+
+    def bn(ch: int) -> int:
+        return 2 * ch
+
+    def block(in_ch: int, out_ch: int) -> int:
+        return conv(in_ch, out_ch) + bn(out_ch) + conv(out_ch, out_ch) + bn(out_ch)
+
+    def up(in_ch: int, out_ch: int) -> int:
+        return out_ch * in_ch * 2 * 2 + out_ch
+
+    total = 0
+    total += block(in_channels, base)
+    total += block(base, base * 2)
+    total += block(base * 2, base * 4)
+    total += block(base * 4, base * 8)
+    total += up(base * 8, base * 4) + block(base * 8, base * 4)
+    total += up(base * 4, base * 2) + block(base * 4, base * 2)
+    total += up(base * 2, base) + block(base * 2, base)
+    total += base * out_channels + out_channels
+    return total
+
+
+def _estimate_unet_params_3d(in_channels: int, out_channels: int, base: int) -> int:
+    def conv(in_ch: int, out_ch: int, k: int = 3) -> int:
+        return out_ch * in_ch * k * k * k + out_ch
+
+    def bn(ch: int) -> int:
+        return 2 * ch
+
+    def block(in_ch: int, out_ch: int) -> int:
+        return conv(in_ch, out_ch) + bn(out_ch) + conv(out_ch, out_ch) + bn(out_ch)
+
+    def up(in_ch: int, out_ch: int) -> int:
+        return out_ch * in_ch * 2 * 2 * 2 + out_ch
+
+    total = 0
+    total += block(in_channels, base)
+    total += block(base, base * 2)
+    total += block(base * 2, base * 4)
+    total += block(base * 4, base * 8)
+    total += up(base * 8, base * 4) + block(base * 8, base * 4)
+    total += up(base * 4, base * 2) + block(base * 4, base * 2)
+    total += up(base * 2, base) + block(base * 2, base)
+    total += base * out_channels + out_channels
+    return total
+
+
+def _model_base_for_capacity(mode: str, capacity: str) -> int:
+    capacity = capacity.lower()
+    if mode == "2d":
+        if capacity == "large":
+            return 64
+        if capacity == "xlarge":
+            return 128
+        return 32
+    if capacity == "large":
+        return 24
+    if capacity == "xlarge":
+        return 32
+    return 16
+
+
+def _capacity_for_model_base(mode: str, model_base: int) -> str:
+    if mode == "2d":
+        if model_base >= 128:
+            return "xlarge"
+        if model_base >= 64:
+            return "large"
+        return "standard"
+    if model_base >= 32:
+        return "xlarge"
+    if model_base >= 24:
+        return "large"
+    return "standard"
+
+
+def _canonical_model_name(model_backend: str, model_name: str | None) -> str:
+    if model_backend == "builtin" and model_name in {"unet2d", "unet3d", None, ""}:
+        return "unet"
+    return model_name or "unet"
+
+
+def _unet_architecture_summary(mode: str, in_channels: int, out_channels: int, base: int) -> str:
     conv = "Conv2d" if mode == "2d" else "Conv3d"
     pool = "MaxPool2d" if mode == "2d" else "MaxPool3d"
     up = "ConvTranspose2d" if mode == "2d" else "ConvTranspose3d"
     spatial = "Y, X" if mode == "2d" else "Z, Y, X"
+    params = (
+        _estimate_unet_params_2d(in_channels, out_channels, base)
+        if mode == "2d"
+        else _estimate_unet_params_3d(in_channels, out_channels, base)
+    )
+    weight_mb = params * 4 / 1024 / 1024
 
     rows = [
         f"Input: {in_channels} channel(s), patch axes {spatial}",
+        f"Base channels: {base}",
+        f"Parameters: {params:,} (~{weight_mb:.1f} MB weights)",
         "",
         f"enc1: {conv} block {in_channels} -> {base}",
         f"pool1: {pool} x2",
@@ -384,6 +477,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         "run_dir": None,
         "run_cfg": None,
         "train_worker": None,
+        "train_token": 0,
         "stop_training_requested": False,
         "infer_worker": None,
         "is_training": False,
@@ -555,8 +649,21 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     num_classes_spin.setRange(1, 255)
     num_classes_spin.setValue(5)
 
+    model_backend_combo = QComboBox()
+    model_backend_combo.addItems(["builtin", "monai", "nnunet", "smp"])
+
     model_combo = QComboBox()
-    model_combo.addItems(["unet2d", "unet3d"])
+    model_combo.addItems(["unet"])
+
+    encoder_combo = QComboBox()
+    encoder_combo.addItems(["plain"])
+
+    encoder_weights_combo = QComboBox()
+    encoder_weights_combo.addItems(["none"])
+
+    model_capacity_combo = QComboBox()
+    model_capacity_combo.addItems(["standard", "large", "xlarge"])
+    model_capacity_combo.setCurrentText("large")
 
     patch_xy_combo = QComboBox()
     patch_xy_combo.addItems(["64", "128", "256", "512", "1024"])
@@ -610,7 +717,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     batch_spin.setValue(2)
 
     val_mode_combo = QComboBox()
-    val_mode_combo.addItems(["split", "kfold"])
+    val_mode_combo.addItems(["split"])
 
     val_split_combo = QComboBox()
     val_split_combo.addItems(["0.1", "0.2", "0.25", "0.3"])
@@ -618,14 +725,15 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
 
     for combo in [
         pairing_mode_combo, training_mode_combo, resume_data_policy_combo,
-        mode_combo, task_combo, model_combo, patch_xy_combo, patch_z_combo,
-        augment_preset_combo, val_mode_combo, val_split_combo,
+        mode_combo, task_combo, model_backend_combo, model_combo, model_capacity_combo, patch_xy_combo, patch_z_combo,
+        encoder_combo, encoder_weights_combo, augment_preset_combo, val_mode_combo, val_split_combo,
     ]:
         _stabilize_combo(combo)
 
     kfold_spin = QSpinBox()
     kfold_spin.setRange(2, 10)
     kfold_spin.setValue(5)
+    kfold_spin.setEnabled(False)
 
     btn_start_train = QPushButton("Start training")
     btn_stop_train = QPushButton("Stop training")
@@ -658,7 +766,11 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     run_form.addRow("Data shape:", mode_combo)
     run_form.addRow("Segmentation task:", task_combo)
     run_form.addRow("Num classes (incl. background):", num_classes_spin)
-    run_form.addRow("Model:", model_combo)
+    run_form.addRow("Model backend:", model_backend_combo)
+    run_form.addRow("Model family:", model_combo)
+    run_form.addRow("Backbone / encoder:", encoder_combo)
+    run_form.addRow("Encoder weights:", encoder_weights_combo)
+    run_form.addRow("Model capacity:", model_capacity_combo)
     run_form.addRow("Epochs:", epochs_spin)
     run_form.addRow("Batch size:", batch_spin)
 
@@ -927,6 +1039,18 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             train_progress.setValue(0)
             train_progress.setFormat("Idle")
 
+    def set_training_stopped_ui():
+        train_status_label.setText("Stopped")
+        train_status_label.setStyleSheet(
+            "QLabel { background-color: #6b5131; color: white; padding: 4px; font-weight: bold; }"
+        )
+        train_progress.setFormat("Stopped")
+        btn_start_train.setEnabled(True)
+        btn_stop_train.setEnabled(False)
+        btn_start_train.setText("Start training")
+        btn_stop_train.setText("Stop training")
+        state["is_training"] = False
+
     def set_infer_ui(running: bool):
         state["is_inference"] = running
         btn_run_infer.setEnabled(not running)
@@ -960,12 +1084,55 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
 
     def _sync_mode_ui():
         mode = mode_combo.currentText()
-        if mode == "2d":
-            model_combo.setCurrentText("unet2d")
-            patch_z_combo.setEnabled(False)
+        patch_z_combo.setEnabled(mode == "3d")
+        _refresh_model_choices()
+
+    def _refresh_model_choices(preferred: str | None = None):
+        backend = model_backend_combo.currentText()
+        mode = mode_combo.currentText()
+        current = preferred or model_combo.currentText()
+        try:
+            specs = model_specs_for_backend(backend, mode)
+        except Exception:
+            specs = []
+
+        model_combo.blockSignals(True)
+        model_combo.clear()
+        model_combo.addItems([spec.name for spec in specs] or ["unet"])
+        if current in [model_combo.itemText(i) for i in range(model_combo.count())]:
+            model_combo.setCurrentText(current)
         else:
-            model_combo.setCurrentText("unet3d")
-            patch_z_combo.setEnabled(True)
+            try:
+                model_combo.setCurrentText(default_model_name(backend, mode))
+            except Exception:
+                model_combo.setCurrentIndex(0)
+        model_combo.blockSignals(False)
+        _refresh_encoder_choices()
+        _refresh_architecture_preview()
+
+    def _refresh_encoder_choices(preferred_encoder: str | None = None, preferred_weights: str | None = None):
+        backend = model_backend_combo.currentText()
+        mode = mode_combo.currentText()
+        family = model_combo.currentText()
+        spec = model_spec(backend, family, mode)
+        encoders = list(spec.encoders) if spec is not None else []
+        weights = list(spec.encoder_weights) if spec is not None else []
+
+        encoder_combo.blockSignals(True)
+        encoder_combo.clear()
+        encoder_combo.addItems(encoders or ["plain"])
+        encoder_combo.setCurrentText(preferred_encoder or (spec.default_encoder if spec and spec.default_encoder else encoder_combo.itemText(0)))
+        encoder_combo.setEnabled(bool(encoders))
+        encoder_combo.blockSignals(False)
+
+        encoder_weights_combo.blockSignals(True)
+        encoder_weights_combo.clear()
+        encoder_weights_combo.addItems(weights or ["none"])
+        if preferred_weights and preferred_weights in [encoder_weights_combo.itemText(i) for i in range(encoder_weights_combo.count())]:
+            encoder_weights_combo.setCurrentText(preferred_weights)
+        encoder_weights_combo.setEnabled(bool(weights))
+        encoder_weights_combo.blockSignals(False)
+        _refresh_architecture_preview()
 
     def _sync_task_ui():
         task = task_combo.currentText()
@@ -1069,20 +1236,32 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             augment_preset_combo.blockSignals(False)
 
     def _refresh_architecture_preview(*_args):
+        mode = mode_combo.currentText()
         out_channels = 1 if task_combo.currentText() == "binary" else int(num_classes_spin.value())
+        base = _model_base_for_capacity(mode, model_capacity_combo.currentText())
+        backend = model_backend_combo.currentText()
+        model_name = model_combo.currentText()
+        encoder = encoder_combo.currentText()
+        encoder_weights = encoder_weights_combo.currentText()
         architecture_summary_box.setPlainText(
-            _unet_architecture_summary(mode_combo.currentText(), 1, out_channels)
+            _unet_architecture_summary(mode, 1, out_channels, base)
+            + f"\n\nbackend: {backend}\nfamily: {model_name}\nencoder: {encoder}\nweights: {encoder_weights}"
         )
 
     mode_combo.currentTextChanged.connect(_sync_mode_ui)
     task_combo.currentTextChanged.connect(_sync_task_ui)
     infer_mode_combo.currentTextChanged.connect(_sync_infer_ui)
     training_mode_combo.currentTextChanged.connect(_sync_training_mode_ui)
+    model_backend_combo.currentTextChanged.connect(lambda _text: _refresh_model_choices())
+    model_combo.currentTextChanged.connect(lambda _text: _refresh_encoder_choices())
+    encoder_combo.currentTextChanged.connect(_refresh_architecture_preview)
+    encoder_weights_combo.currentTextChanged.connect(_refresh_architecture_preview)
     augment_preset_combo.currentTextChanged.connect(_apply_augmentation_preset)
     btn_reset_augmentation.clicked.connect(_apply_augmentation_preset)
     btn_refresh_architecture.clicked.connect(_refresh_architecture_preview)
     mode_combo.currentTextChanged.connect(_refresh_architecture_preview)
     task_combo.currentTextChanged.connect(_refresh_architecture_preview)
+    model_capacity_combo.currentTextChanged.connect(_refresh_architecture_preview)
     num_classes_spin.valueChanged.connect(_refresh_architecture_preview)
 
     for widget in [
@@ -1286,7 +1465,20 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             # auto-fill training controls from previous run
             mode_combo.setCurrentText(cfg.get("mode_2d_or_3d", "2d"))
             task_combo.setCurrentText(cfg.get("task_type", "binary"))
-            model_combo.setCurrentText(cfg.get("model_name", "unet2d"))
+            model_backend_combo.setCurrentText(cfg.get("model_backend", "builtin"))
+            _refresh_model_choices(preferred=cfg.get("model_name", "unet"))
+            model_params = cfg.get("model_params", {}) if isinstance(cfg.get("model_params", {}), dict) else {}
+            _refresh_encoder_choices(
+                preferred_encoder=model_params.get("encoder_name"),
+                preferred_weights=model_params.get("encoder_weights"),
+            )
+            default_base = 32 if cfg.get("mode_2d_or_3d", "2d") == "2d" else 16
+            model_capacity_combo.setCurrentText(
+                _capacity_for_model_base(
+                    cfg.get("mode_2d_or_3d", "2d"),
+                    int(cfg.get("model_base", default_base)),
+                )
+            )
             patch_xy_combo.setCurrentText(str(cfg.get("patch_xy", 256)))
 
             patch_z_val = cfg.get("patch_z", None)
@@ -1306,7 +1498,11 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             lines = [
                 f"mode_2d_or_3d: {cfg.get('mode_2d_or_3d')}",
                 f"task_type: {cfg.get('task_type')}",
+                f"model_backend: {cfg.get('model_backend', 'builtin')}",
                 f"model_name: {cfg.get('model_name')}",
+                f"model_base: {cfg.get('model_base', default_base)}",
+                f"encoder_name: {model_params.get('encoder_name', 'plain')}",
+                f"encoder_weights: {model_params.get('encoder_weights', 'none')}",
                 f"patch_xy: {cfg.get('patch_xy')}",
                 f"patch_z: {cfg.get('patch_z')}",
                 f"out_channels: {cfg.get('out_channels')}",
@@ -1332,7 +1528,17 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     def _build_run_config() -> RunConfig:
         mode = mode_combo.currentText()
         task = task_combo.currentText()
+        model_backend = model_backend_combo.currentText()
         model_name = model_combo.currentText()
+        model_base = _model_base_for_capacity(mode, model_capacity_combo.currentText())
+        model_params = {
+            "capacity": model_capacity_combo.currentText(),
+            "patch_xy": int(patch_xy_combo.currentText()),
+            "encoder_name": encoder_combo.currentText(),
+            "encoder_weights": encoder_weights_combo.currentText(),
+        }
+        if mode == "3d":
+            model_params["patch_z"] = int(patch_z_combo.currentText())
         output_dir = output_dir_edit.text().strip()
 
         if not output_dir:
@@ -1350,9 +1556,12 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         return RunConfig(
             mode_2d_or_3d=mode,
             task_type=task,
+            model_backend=model_backend,
             model_name=model_name,
             in_channels=1,
             out_channels=out_channels,
+            model_base=model_base,
+            model_params=model_params,
             patch_xy=int(patch_xy_combo.currentText()),
             patch_z=None if mode == "2d" else int(patch_z_combo.currentText()),
             overlap_percent=int(overlap_spin.value()),
@@ -1373,7 +1582,25 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         checks = [
             ("mode_2d_or_3d", new_cfg.mode_2d_or_3d, resume_cfg.get("mode_2d_or_3d")),
             ("task_type", new_cfg.task_type, resume_cfg.get("task_type")),
-            ("model_name", new_cfg.model_name, resume_cfg.get("model_name")),
+            ("model_backend", new_cfg.model_backend, resume_cfg.get("model_backend", "builtin")),
+            (
+                "model_name",
+                _canonical_model_name(new_cfg.model_backend, new_cfg.model_name),
+                _canonical_model_name(resume_cfg.get("model_backend", "builtin"), resume_cfg.get("model_name")),
+            ),
+            (
+                "encoder_name",
+                new_cfg.model_params.get("encoder_name", "plain"),
+                (resume_cfg.get("model_params") or {}).get("encoder_name", "plain"),
+            ),
+            (
+                "model_base",
+                int(new_cfg.model_base),
+                int(resume_cfg.get(
+                    "model_base",
+                    32 if new_cfg.mode_2d_or_3d == "2d" else 16,
+                )),
+            ),
             ("out_channels", int(new_cfg.out_channels), int(resume_cfg.get("out_channels", -1))),
         ]
 
@@ -1435,6 +1662,8 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 show_warning("Training is already running.")
                 return
 
+            state["train_token"] = int(state.get("train_token", 0)) + 1
+            train_token = state["train_token"]
             state["stop_training_requested"] = False
             _release_training_memory(clear_model=True)
 
@@ -1474,8 +1703,12 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             train_cfg = TrainConfig(
                 mode_2d_or_3d=cfg.mode_2d_or_3d,
                 task_type=cfg.task_type,
+                model_backend=cfg.model_backend,
+                model_name=cfg.model_name,
                 in_channels=cfg.in_channels,
                 out_channels=cfg.out_channels,
+                model_base=cfg.model_base,
+                model_params=cfg.model_params,
                 batch_size=cfg.batch_size,
                 epochs=cfg.epochs,
                 lr=cfg.learning_rate,
@@ -1523,7 +1756,10 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 import torch
 
                 def _should_stop():
-                    return bool(state.get("stop_training_requested", False))
+                    return (
+                        bool(state.get("stop_training_requested", False))
+                        or state.get("train_token") != train_token
+                    )
 
                 if _should_stop():
                     raise TrainingCancelled("Training stopped by user.")
@@ -1563,6 +1799,15 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 yield {
                     "kind": "status",
                     "message": f"Splitting dataset: train={n_train}, val={n_val}"
+                }
+                yield {
+                    "kind": "validation",
+                    "mode": "split",
+                    "val_split": float(train_cfg.val_split),
+                    "seed": 42,
+                    "total_samples": int(n_total),
+                    "train_samples": int(n_train),
+                    "val_samples": int(n_val),
                 }
 
                 train_ds, val_ds = random_split(
@@ -1669,24 +1914,39 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             state["train_worker"] = worker
 
             def _mark_training_stopped():
-                train_status_label.setText("Stopped")
-                train_status_label.setStyleSheet(
-                    "QLabel { background-color: #6b5131; color: white; padding: 4px; font-weight: bold; }"
-                )
-                train_progress.setFormat("Stopped")
-                btn_start_train.setEnabled(True)
-                btn_stop_train.setEnabled(False)
-                btn_start_train.setText("Start training")
-                btn_stop_train.setText("Stop training")
-                state["is_training"] = False
+                if state.get("train_token") != train_token:
+                    return
+                set_training_stopped_ui()
                 state["stop_training_requested"] = False
                 _release_training_memory(clear_model=True)
 
             def _on_yielded(payload):
+                if state.get("train_token") != train_token:
+                    return
                 if payload.get("kind") == "status":
                     msg = payload["message"]
                     log(msg)
                     train_progress.setFormat(msg)
+                    return
+
+                if payload.get("kind") == "validation":
+                    validation_meta = {
+                        "mode": payload["mode"],
+                        "val_split": payload["val_split"],
+                        "seed": payload["seed"],
+                        "total_samples": payload["total_samples"],
+                        "train_samples": payload["train_samples"],
+                        "val_samples": payload["val_samples"],
+                        "kfold_active": False,
+                    }
+                    save_json(run_dir / "validation.json", validation_meta)
+                    log(
+                        "Validation mode: split | "
+                        f"seed={validation_meta['seed']} | "
+                        f"train={validation_meta['train_samples']} "
+                        f"val={validation_meta['val_samples']} "
+                        f"total={validation_meta['total_samples']}"
+                    )
                     return
 
                 if payload.get("kind") == "epoch":
@@ -1707,6 +1967,8 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                     )
 
             def _on_returned(result):
+                if state.get("train_token") != train_token:
+                    return
                 if state.get("stop_training_requested", False):
                     log("Training stopped by user. Model state was discarded and GPU cache was cleared if available.")
                     show_info("Training stopped.")
@@ -1755,6 +2017,8 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 state["stop_training_requested"] = False
 
             def _on_error(exc):
+                if state.get("train_token") != train_token:
+                    return
                 cancelled = exc.__class__.__name__ == "TrainingCancelled" or "stopped by user" in str(exc).lower()
                 if cancelled:
                     log("Training stopped by user. Model state was discarded and GPU cache was cleared if available.")
@@ -1777,6 +2041,8 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 _release_training_memory(clear_model=True)
 
             def _on_finished():
+                if state.get("train_token") != train_token:
+                    return
                 if state.get("stop_training_requested", False) and state.get("is_training", False):
                     log("Training worker stopped. Model state was discarded and GPU cache was cleared if available.")
                     _mark_training_stopped()
@@ -1797,19 +2063,19 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         if not state.get("is_training", False):
             return
 
-        state["stop_training_requested"] = True
-        btn_stop_train.setEnabled(False)
-        btn_stop_train.setText("Stopping...")
-        train_status_label.setText("Stopping")
-        train_status_label.setStyleSheet(
-            "QLabel { background-color: #6b5131; color: white; padding: 4px; font-weight: bold; }"
-        )
-        train_progress.setFormat("Stopping after current batch...")
-        log("Stop requested. Training will stop after the current batch.")
-
         worker = state.get("train_worker")
+        state["stop_training_requested"] = True
+        state["train_token"] = int(state.get("train_token", 0)) + 1
+        set_training_stopped_ui()
+        _release_training_memory(clear_model=True)
+        log("Stop requested. Training UI was released; the worker was asked to quit.")
+
         if worker is not None:
             try:
+                if hasattr(worker, "cancel"):
+                    worker.cancel()
+                if hasattr(worker, "requestInterruption"):
+                    worker.requestInterruption()
                 worker.quit()
             except Exception:
                 pass

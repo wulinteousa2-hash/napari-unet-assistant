@@ -6,12 +6,15 @@ It is designed for users who already have image-mask training data and want to p
 
 This plugin is separate from SAM-based annotation workflows. Its focus is conventional supervised U-Net training from existing image-mask pairs.
 
-## What's new in 0.3.0
+## What's new in 0.4.0
 
 - Added recursive dataset-folder auto pairing for TIFF datasets with `images`/`masks`, `raw`/`labels`, mixed-folder, and nested layouts.
 - Added folder-name role hints so dataset folders can guide image-mask pairing even when filenames are less explicit.
 - Added configurable augmentation presets: `none`, `conservative`, `balanced`, and `strong`.
 - Added custom augmentation controls for flips, rotation, shear, scale, brightness jitter, and Gaussian noise.
+- Added model-capacity options for standard, large, and xlarge U-Net widths.
+- Added a model registry with built-in U-Net, MONAI, nnU-Net, and segmentation-models-pytorch backend hooks.
+- Added separate model-family, backbone/encoder, and encoder-weight controls for clearer U-Net variant testing.
 - Added saving and loading of augmentation settings in run configuration metadata.
 - Added a training stop button that cancels after the current batch, discards the interrupted model state, and clears GPU cache when available.
 - Added a U-Net architecture preview for the selected 2D/3D mode and output-channel configuration.
@@ -26,6 +29,8 @@ This plugin is separate from SAM-based annotation workflows. Its focus is conven
 - Patch-based training with configurable patch size and overlap
 - Optional empty-mask patch inclusion
 - Configurable augmentation presets and custom augmentation controls
+- Standard, large, and xlarge U-Net capacity options
+- Optional model backends for MONAI, nnU-Net, and segmentation-models-pytorch
 - 80/20 validation split
 - Continue training from a previous run
 - Training cancellation from the UI
@@ -78,6 +83,31 @@ The selected augmentation configuration is saved in each run folder's `config.js
 The training panel includes a stop button for cancelling an active training run. Cancellation is checked between batches, so the current batch may finish before the run stops.
 
 When a run is stopped, the interrupted model state is discarded and GPU cache is cleared when available.
+
+## Model capacity
+
+Training can use standard, large, or xlarge U-Net widths. For 2D models, these use base channel widths of 32, 64, and 128. Larger models can learn more complex boundaries, but they need more GPU memory and may require a smaller batch size.
+
+## Model backends
+
+The default backend is the built-in U-Net. Optional backends can be installed separately:
+
+```bash
+pip install napari-unet-assistant[monai]
+pip install napari-unet-assistant[smp]
+pip install napari-unet-assistant[nnunet]
+pip install napari-unet-assistant[models]
+```
+
+The model registry lives under `src/napari_unet_assistant/models/` and separates provider code into `providers/`. MONAI and segmentation-models-pytorch models are regular `torch.nn.Module` backends. nnU-Net is reserved as a pipeline adapter because nnU-Net manages its own data conversion, training, and prediction workflow.
+
+Model selection is split into:
+
+- `Model backend`: implementation source, such as built-in, MONAI, SMP, or nnU-Net
+- `Model family`: architecture family, such as U-Net, U-Net++, SegResNet, or DeepLabV3+
+- `Backbone / encoder`: feature extractor when the selected family supports one, such as ResNet34, ResNet50, EfficientNet-B0, DenseNet121, or MobileNetV2
+- `Encoder weights`: pretrained encoder weights when supported
+- `Model capacity`: built-in width preset used by backends that expose width/depth-style capacity
 
 ## Manual CSV pairing
 
@@ -187,7 +217,9 @@ Default: `16 x 256 x 256`
 
 The current training workflow uses a standard train/validation split. The default validation split is 20%.
 
-K-fold controls may exist in the UI/config, but k-fold training is not active in this release.
+K-fold cross-validation is not active in this release.
+
+Each run writes `validation.json` with the active validation mode, split fraction, random seed, total patch count, train patch count, and validation patch count. The training log also reports the same split. Per-epoch validation metrics are written to `history.csv`.
 
 ## Outputs
 
@@ -197,6 +229,7 @@ Each run folder can contain:
 - `config.json`
 - `summary.json`
 - `history.csv`
+- `validation.json`
 - `pairs.csv`
 - prediction TIFF outputs
 

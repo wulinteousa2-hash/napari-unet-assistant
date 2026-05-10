@@ -7,9 +7,12 @@ from dataclasses import asdict, dataclass
 class RunConfig:
     mode_2d_or_3d: str
     task_type: str               # "binary" or "multiclass"
-    model_name: str              # "unet2d" or "unet3d"
+    model_backend: str
+    model_name: str
     in_channels: int
     out_channels: int
+    model_base: int
+    model_params: dict
     patch_xy: int
     patch_z: int | None
     overlap_percent: int

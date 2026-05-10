@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from ..models.unet import UNet2D, UNet3D
+from ..models.registry import build_model_from_config
 from .losses import BinaryBCEDiceLoss, MulticlassDiceCELoss
 from .metrics import binary_metrics_from_logits, multiclass_mean_metrics_from_logits
 
@@ -14,8 +14,12 @@ from .metrics import binary_metrics_from_logits, multiclass_mean_metrics_from_lo
 class TrainConfig:
     mode_2d_or_3d: str = "2d"
     task_type: str = "binary"
+    model_backend: str = "builtin"
+    model_name: str = "unet"
     in_channels: int = 1
     out_channels: int = 1
+    model_base: int | None = None
+    model_params: dict | None = None
     batch_size: int = 2
     epochs: int = 5
     lr: float = 1e-3
@@ -28,11 +32,7 @@ class TrainingCancelled(RuntimeError):
 
 
 def build_model(cfg: TrainConfig) -> torch.nn.Module:
-    if cfg.mode_2d_or_3d == "2d":
-        return UNet2D(cfg.in_channels, cfg.out_channels)
-    if cfg.mode_2d_or_3d == "3d":
-        return UNet3D(cfg.in_channels, cfg.out_channels)
-    raise ValueError("mode_2d_or_3d must be '2d' or '3d'")
+    return build_model_from_config(cfg)
 
 
 def build_loss(cfg: TrainConfig):

@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset
 
 from ..io.loaders import ensure_numpy, load_image_any
-from ..training.augment import augment_2d_conservative, augment_3d_conservative
+from ..training.augment import AugmentationConfig, augment_2d, augment_3d
 from ..training.patching import (
     extract_patch_2d,
     extract_patch_3d,
@@ -38,6 +38,7 @@ class PatchDataset(Dataset):
         overlap_percent: int,
         include_empty_mask: bool,
         augment: bool = False,
+        augment_config: dict | AugmentationConfig | None = None,
         seed: int = 123,
         cache_arrays: bool = True,
     ):
@@ -53,6 +54,13 @@ class PatchDataset(Dataset):
         self.overlap_percent = int(overlap_percent)
         self.include_empty_mask = bool(include_empty_mask)
         self.augment = bool(augment)
+        if isinstance(augment_config, AugmentationConfig):
+            self.augment_config = augment_config
+        elif augment_config is None:
+            self.augment_config = AugmentationConfig(enabled=self.augment)
+        else:
+            self.augment_config = AugmentationConfig.from_dict(augment_config)
+        self.augment_config.enabled = self.augment and self.augment_config.enabled
         self.cache_arrays = bool(cache_arrays)
         self.rng = np.random.default_rng(seed)
 
@@ -224,7 +232,7 @@ class PatchDataset(Dataset):
                 )
 
             if self.augment:
-                img, msk = augment_2d_conservative(img, msk, self.rng)
+                img, msk = augment_2d(img, msk, self.rng, self.augment_config)
 
             img = img[None, ...]  # C,Y,X
 
@@ -258,7 +266,7 @@ class PatchDataset(Dataset):
                 )
 
             if self.augment:
-                img, msk = augment_3d_conservative(img, msk, self.rng)
+                img, msk = augment_3d(img, msk, self.rng, self.augment_config)
 
             img = img[None, ...]  # C,Z,Y,X
 

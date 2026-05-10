@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0 - Training controls and recursive dataset pairing
+
+### Added
+
+- Added recursive dataset-folder auto pairing for common `images`/`masks`, `raw`/`labels`, mixed-folder, and nested TIFF dataset layouts.
+- Added folder-name role hints so folders named like `images`, `raw`, `masks`, or `labels` can guide pairing even when filenames are less explicit.
+- Added automatic selection of the best pairing strategy from recursive scan, two-subfolder scan, and mixed-folder scan results.
+- Added configurable augmentation presets: `none`, `conservative`, `balanced`, and `strong`.
+- Added custom augmentation controls for horizontal and vertical flips, rotation, shear, scale, brightness jitter, and Gaussian noise.
+- Added saving and loading of augmentation settings in run configuration metadata.
+- Added a training stop button that requests cancellation, discards the interrupted model state, and clears GPU cache when available.
+- Added a U-Net architecture preview for the selected 2D/3D mode and output-channel configuration.
+
+### Changed
+
+- Changed auto pairing to focus on scanning one dataset root recursively instead of mixing dataset-folder and two-folder inputs in the same mode.
+- Improved one-folder pairing by using the recursive dataset auto-pairing logic.
+- Improved role-suffix stripping so repeated trailing role tokens can be removed from filenames before matching.
+- Reworked the training panel into clearer tabs and more stable Qt sizing so controls fit better in the dock widget.
+- Replaced the fixed conservative augmentation path with configuration-driven augmentation used by both 2D and 3D datasets.
+- Improved training startup and shutdown handling by releasing old model memory before a new run and after cancellation or errors.
+
+### Notes
+
+- This version remains focused on TIFF-based supervised U-Net training and inference.
+- OME-Zarr, spectral/lambda workflows, and SAM-assisted annotation remain outside the scope of this version.
+
 ## 0.2.0 - Smart pairing update
 
 ### Added

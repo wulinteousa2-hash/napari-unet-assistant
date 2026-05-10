@@ -23,6 +23,10 @@ class TrainConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
+class TrainingCancelled(RuntimeError):
+    """Raised when the user requests training cancellation."""
+
+
 def build_model(cfg: TrainConfig) -> torch.nn.Module:
     if cfg.mode_2d_or_3d == "2d":
         return UNet2D(cfg.in_channels, cfg.out_channels)
@@ -37,7 +41,7 @@ def build_loss(cfg: TrainConfig):
     return MulticlassDiceCELoss(num_classes=cfg.out_channels)
 
 
-def _run_epoch(model, loader, loss_fn, optimizer, cfg, train: bool):
+def _run_epoch(model, loader, loss_fn, optimizer, cfg, train: bool, should_stop=None):
     if train:
         model.train()
     else:
@@ -47,6 +51,9 @@ def _run_epoch(model, loader, loss_fn, optimizer, cfg, train: bool):
     all_metrics = []
 
     for x, y in loader:
+        if should_stop is not None and should_stop():
+            raise TrainingCancelled("Training stopped by user.")
+
         x = x.to(cfg.device)
 
         if cfg.task_type == "binary":
@@ -71,6 +78,9 @@ def _run_epoch(model, loader, loss_fn, optimizer, cfg, train: bool):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+
+        if should_stop is not None and should_stop():
+            raise TrainingCancelled("Training stopped by user.")
 
         total_loss += float(loss.item())
         all_metrics.append(metrics)

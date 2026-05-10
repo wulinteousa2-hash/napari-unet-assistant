@@ -6,28 +6,29 @@ It is designed for users who already have image-mask training data and want to p
 
 This plugin is separate from SAM-based annotation workflows. Its focus is conventional supervised U-Net training from existing image-mask pairs.
 
-## What's new in 0.2.0
+## What's new in 0.3.0
 
-- Added smarter image-mask pairing.
-- Added support for one-folder mixed datasets.
-- Added manual CSV pairing.
-- Added `_1` / `_2` pairing support, where `_1` is treated as image and `_2` as mask.
-- Added expanded mask-name detection, including `_mask`, `_label`, `_seg`, `_annotation`, `_gt`, and related suffixes.
-- Added expanded image-name detection, including `_image`, `_img`, `_raw`, `_input`, and related suffixes.
-- Added pair confidence, pairing reason, and shape-check status.
-- Added reporting for ambiguous, unmatched, rejected, and shape-mismatched files.
+- Added recursive dataset-folder auto pairing for TIFF datasets with `images`/`masks`, `raw`/`labels`, mixed-folder, and nested layouts.
+- Added folder-name role hints so dataset folders can guide image-mask pairing even when filenames are less explicit.
+- Added configurable augmentation presets: `none`, `conservative`, `balanced`, and `strong`.
+- Added custom augmentation controls for flips, rotation, shear, scale, brightness jitter, and Gaussian noise.
+- Added saving and loading of augmentation settings in run configuration metadata.
+- Added a training stop button that cancels after the current batch, discards the interrupted model state, and clears GPU cache when available.
+- Added a U-Net architecture preview for the selected 2D/3D mode and output-channel configuration.
+- Improved the training UI layout with clearer tabs and more stable dock-widget sizing.
 
 ## Highlights
 
 - TIFF-first 2D and 3D U-Net training
 - Binary and multiclass segmentation
-- Smart image-mask pairing
+- Recursive smart image-mask pairing
 - Pair review with confidence, reason, and shape-check status
 - Patch-based training with configurable patch size and overlap
 - Optional empty-mask patch inclusion
-- Conservative augmentation
+- Configurable augmentation presets and custom augmentation controls
 - 80/20 validation split
 - Continue training from a previous run
+- Training cancellation from the UI
 - Single-image and folder inference
 - 2D image and 3D volume prediction
 - TIFF prediction export
@@ -37,9 +38,17 @@ This plugin is separate from SAM-based annotation workflows. Its focus is conven
 
 The plugin can pair training data from:
 
+- a dataset root scanned recursively
 - separate image and mask folders
 - one mixed folder containing both images and masks
 - a manual CSV file
+
+Dataset-root auto scan supports common layouts such as:
+
+- `images/` + `masks/`
+- `raw/` + `labels/`
+- nested TIFF folders under one dataset root
+- one mixed folder containing `sample.tif` + `sample_mask.tif`
 
 Supported naming patterns include:
 
@@ -49,6 +58,26 @@ Supported naming patterns include:
 - `sample_raw.tif` + `sample_label.tif`
 
 After scanning, the plugin shows each proposed pair with confidence, reason, and shape-check status. Ambiguous or invalid pairs are reported instead of being silently used for training.
+
+Folder names such as `images`, `raw`, `masks`, and `labels` can also provide role hints during recursive dataset scans.
+
+## Augmentation
+
+Training supports augmentation presets and custom controls:
+
+- `none`: no augmentation
+- `conservative`: flips, small rotations/scales, and light brightness jitter
+- `balanced`: stronger rotation/scale, shear, brightness jitter, and light Gaussian noise
+- `strong`: wider rotation/scale/shear ranges, stronger brightness jitter, and stronger Gaussian noise
+- `custom`: user-selected flips, rotation, shear, scale, brightness, and noise settings
+
+The selected augmentation configuration is saved in each run folder's `config.json` and restored when loading run metadata.
+
+## Training controls
+
+The training panel includes a stop button for cancelling an active training run. Cancellation is checked between batches, so the current batch may finish before the run stops.
+
+When a run is stopped, the interrupted model state is discarded and GPU cache is cleared when available.
 
 ## Manual CSV pairing
 

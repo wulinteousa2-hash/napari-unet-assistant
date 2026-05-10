@@ -94,7 +94,12 @@ def _tokens(stem: str) -> list[str]:
 
 def _strip_known_role_suffix(stem: str) -> str:
     """Remove one trailing role token, including _1/_2, from a stem."""
-    out = _TRAILING_ROLE_RE.sub("", stem).strip(" ._-")
+    out = stem
+    while True:
+        nxt = _TRAILING_ROLE_RE.sub("", out).strip(" ._-")
+        if nxt == out or not nxt:
+            break
+        out = nxt
     return out or stem
 
 
@@ -153,6 +158,35 @@ def _candidate_from_path(path: Path, forced_role: FileRole | None = None, source
         reason=reason,
         source=source,
     )
+
+
+def _path_role_hint(path: Path, root: Path) -> tuple[FileRole | None, str]:
+    try:
+        rel_parts = path.relative_to(root).parts[:-1]
+    except ValueError:
+        rel_parts = path.parts[:-1]
+
+    mask_hits = []
+    image_hits = []
+    for part in rel_parts:
+        toks = _tokens(part)
+        if any(tok in _MASK_WORDS for tok in toks):
+            mask_hits.append(part)
+        if any(tok in _IMAGE_WORDS for tok in toks):
+            image_hits.append(part)
+
+    if mask_hits and not image_hits:
+        return "mask", f"folder role hint: {mask_hits[-1]}"
+    if image_hits and not mask_hits:
+        return "image", f"folder role hint: {image_hits[-1]}"
+    return None, ""
+
+
+def _report_score(report: PairingReport) -> tuple[int, int, int]:
+    ok = len(report.valid_pairs)
+    warnings = sum(1 for p in report.pairs if p.status == "ambiguous")
+    rejected = len(report.rejected) + len(report.unmatched_images) + len(report.unmatched_masks)
+    return ok, warnings, -rejected
 
 
 def _shape_text(shape: tuple[int, ...] | None) -> str:
@@ -373,6 +407,74 @@ def pair_mixed_folder(
     return report
 
 
+def pair_dataset_folder_auto(
+    dataset_dir: str | Path,
+    *,
+    validate_shapes: bool = True,
+    recursive: bool = True,
+) -> PairingReport:
+    """Pair a dataset root by recursively scanning files and common subfolder layouts.
+
+    Supported layouts include:
+    - images/ + masks/
+    - raw/ + labels/
+    - one mixed folder with sample.tif + sample_mask.tif
+    - nested versions of the above under one dataset root
+    """
+    root = Path(dataset_dir)
+    files = _iter_tiff_files(root, recursive=recursive)
+    if not files:
+        raise ValueError(f"No TIFF files found under dataset folder: {root}")
+
+    candidates: list[FileCandidate] = []
+    for p in files:
+        folder_role, folder_reason = _path_role_hint(p, root)
+        cand = _candidate_from_path(p, forced_role=folder_role, source="dataset_dir_recursive")
+        if folder_role is not None:
+            cand = FileCandidate(
+                path=cand.path,
+                role=cand.role,
+                key=cand.key,
+                confidence=max(cand.confidence, 92),
+                reason=folder_reason,
+                source=cand.source,
+            )
+        candidates.append(cand)
+
+    images = [c for c in candidates if c.role == "image"]
+    masks = [c for c in candidates if c.role == "mask"]
+
+    reports: list[PairingReport] = []
+    if images and masks:
+        reports.append(_build_pairs(
+            images,
+            masks,
+            validate_shapes=validate_shapes,
+            mode_used="auto_dataset_recursive",
+        ))
+
+    child_dirs = sorted(p for p in root.iterdir() if p.is_dir())
+    tiff_child_dirs = [p for p in child_dirs if _iter_tiff_files(p, recursive=True)]
+    if len(tiff_child_dirs) == 2:
+        a, b = tiff_child_dirs
+        reports.append(pair_image_mask_folders(a, b, validate_shapes=validate_shapes, recursive=True))
+        reports[-1].mode_used = f"auto_two_subfolders: images={a.name}, masks={b.name}"
+        reports.append(pair_image_mask_folders(b, a, validate_shapes=validate_shapes, recursive=True))
+        reports[-1].mode_used = f"auto_two_subfolders: images={b.name}, masks={a.name}"
+
+    mixed_report = pair_mixed_folder(root, validate_shapes=validate_shapes, recursive=recursive)
+    mixed_report.mode_used = "auto_mixed_recursive"
+    reports.append(mixed_report)
+
+    best = max(reports, key=_report_score)
+    if not best.pairs:
+        best.ambiguous.append(
+            "Auto scanned recursively but did not find pairs. "
+            "Use filenames like sample.tif + sample_mask.tif, or folders named images/raw and masks/labels."
+        )
+    return best
+
+
 def pair_auto(
     *,
     dataset_dir: str | Path | None = None,
@@ -381,13 +483,17 @@ def pair_auto(
     validate_shapes: bool = True,
     recursive: bool = False,
 ) -> PairingReport:
-    """Auto mode: prefer one-folder dataset if provided, otherwise use two folders."""
+    """Auto mode: prefer recursive dataset-root pairing, otherwise use two folders."""
     dataset_dir = Path(dataset_dir) if dataset_dir else None
     image_dir = Path(image_dir) if image_dir else None
     mask_dir = Path(mask_dir) if mask_dir else None
 
     if dataset_dir and str(dataset_dir).strip() and dataset_dir.is_dir():
-        return pair_mixed_folder(dataset_dir, validate_shapes=validate_shapes, recursive=recursive)
+        return pair_dataset_folder_auto(
+            dataset_dir,
+            validate_shapes=validate_shapes,
+            recursive=True,
+        )
 
     if image_dir and mask_dir:
         return pair_image_mask_folders(image_dir, mask_dir, validate_shapes=validate_shapes, recursive=recursive)

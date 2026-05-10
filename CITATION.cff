@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use napari-unet-assistant in your work, please cite it using this metadata."
 type: software
 title: "napari-unet-assistant"
-version: "0.2.0"
-date-released: "2026-05-03"
+version: "0.3.0"
+date-released: "2026-05-09"
 authors:
   - family-names: "Teo"
     given-names: "Wulin"

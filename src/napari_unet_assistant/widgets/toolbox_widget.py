@@ -4,11 +4,13 @@ import csv
 from pathlib import Path
 
 import torch
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
     QPushButton, QLabel, QPlainTextEdit, QFileDialog, QLineEdit,
     QComboBox, QSpinBox, QCheckBox, QListWidget, QAbstractItemView,
-    QScrollArea, QProgressBar, QToolButton
+    QScrollArea, QProgressBar, QToolButton, QTabWidget, QDoubleSpinBox,
+    QSizePolicy,
 )
 import napari
 from napari.utils.notifications import show_info, show_warning
@@ -22,13 +24,19 @@ from ..inference.predictor import (
 from ..io.loaders import ensure_numpy, load_image_any
 from ..io.pairing import (
     pair_auto,
+    pair_dataset_folder_auto,
     pair_image_mask_folders,
     pair_mixed_folder,
     pair_from_csv,
 )
 from ..io.writers import ensure_dir, save_csv_rows, save_json, save_tiff
+from ..training.augment import AugmentationConfig
 from ..training.trainer import TrainConfig
 from ..utils.config import RunConfig
+
+
+_PANEL_MIN_WIDTH = 520
+_PANEL_PREFERRED_WIDTH = 620
 
 
 def _get_viewer(napari_viewer=None):
@@ -56,6 +64,101 @@ def _gpu_status_label() -> QLabel:
     return lbl
 
 
+def _double_spin(value: float, minimum: float, maximum: float, step: float) -> QDoubleSpinBox:
+    spin = QDoubleSpinBox()
+    spin.setRange(minimum, maximum)
+    spin.setSingleStep(step)
+    spin.setDecimals(3 if step < 0.01 else 2)
+    spin.setValue(value)
+    return spin
+
+
+def _make_width_neutral(widget: QWidget, vertical_policy=QSizePolicy.Fixed):
+    widget.setMinimumWidth(0)
+    widget.setSizePolicy(QSizePolicy.Ignored, vertical_policy)
+    return widget
+
+
+def _stabilize_combo(combo: QComboBox):
+    combo.setMinimumContentsLength(8)
+    combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+    _make_width_neutral(combo)
+
+
+def _stabilize_line_edit(line_edit: QLineEdit):
+    line_edit.setMinimumWidth(0)
+    line_edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+
+
+def _stabilize_plain_text(edit: QPlainTextEdit):
+    edit.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+    edit.setMinimumWidth(0)
+    edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+
+def _stabilize_list(list_widget: QListWidget):
+    list_widget.setMinimumWidth(0)
+    list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    list_widget.setTextElideMode(Qt.ElideMiddle)
+    list_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+
+def _stabilize_label(label: QLabel):
+    label.setMinimumWidth(0)
+    label.setWordWrap(True)
+    label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+
+def _stabilize_progress(progress: QProgressBar):
+    progress.setMinimumWidth(0)
+    progress.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+
+
+def _stabilize_form(form: QFormLayout):
+    form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+    form.setLabelAlignment(Qt.AlignLeft)
+
+
+def _stabilize_row(row: QWidget):
+    row.setMinimumWidth(0)
+    row.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+
+
+def _mirror_text_as_tooltip(line_edit: QLineEdit):
+    line_edit.textChanged.connect(line_edit.setToolTip)
+
+
+def _unet_architecture_summary(mode: str, in_channels: int, out_channels: int) -> str:
+    base = 32 if mode == "2d" else 16
+    conv = "Conv2d" if mode == "2d" else "Conv3d"
+    pool = "MaxPool2d" if mode == "2d" else "MaxPool3d"
+    up = "ConvTranspose2d" if mode == "2d" else "ConvTranspose3d"
+    spatial = "Y, X" if mode == "2d" else "Z, Y, X"
+
+    rows = [
+        f"Input: {in_channels} channel(s), patch axes {spatial}",
+        "",
+        f"enc1: {conv} block {in_channels} -> {base}",
+        f"pool1: {pool} x2",
+        f"enc2: {conv} block {base} -> {base * 2}",
+        f"pool2: {pool} x2",
+        f"enc3: {conv} block {base * 2} -> {base * 4}",
+        f"pool3: {pool} x2",
+        f"bottleneck: {conv} block {base * 4} -> {base * 8}",
+        "",
+        f"up3: {up} {base * 8} -> {base * 4}, concatenate enc3",
+        f"dec3: {conv} block {base * 8} -> {base * 4}",
+        f"up2: {up} {base * 4} -> {base * 2}, concatenate enc2",
+        f"dec2: {conv} block {base * 4} -> {base * 2}",
+        f"up1: {up} {base * 2} -> {base}, concatenate enc1",
+        f"dec1: {conv} block {base * 2} -> {base}",
+        "",
+        f"head: 1x1 {conv} {base} -> {out_channels}",
+    ]
+    return "\n".join(rows)
+
+
 class _StepSection(QWidget):
     _ACCENT = ("#6b5131", "#d6a75f")
 
@@ -63,6 +166,8 @@ class _StepSection(QWidget):
         super().__init__(parent)
         self._step = step
         self._title = title
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         badge_color, accent_color = self._ACCENT
 
         root_layout = QVBoxLayout(self)
@@ -98,6 +203,7 @@ class _StepSection(QWidget):
 
         title_label = QLabel(title)
         title_label.setObjectName("stepTitle")
+        _stabilize_label(title_label)
 
         header_layout.addWidget(self._toggle)
         header_layout.addWidget(step_badge)
@@ -106,6 +212,8 @@ class _StepSection(QWidget):
 
         self.body = QGroupBox(hint)
         self.body.setObjectName("stepBody")
+        self.body.setMinimumWidth(0)
+        self.body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.body.setStyleSheet(
             "QGroupBox#stepBody { "
             f"border-color: {badge_color}; "
@@ -248,6 +356,9 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     viewer = _get_viewer(napari_viewer)
 
     root = QWidget()
+    root.setMinimumWidth(_PANEL_MIN_WIDTH)
+    root.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+    root.resize(_PANEL_PREFERRED_WIDTH, root.height())
     _apply_step_style(root)
     root_layout = QVBoxLayout(root)
 
@@ -257,9 +368,12 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
 
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     root_layout.addWidget(scroll)
 
     container = QWidget()
+    container.setMinimumWidth(_PANEL_MIN_WIDTH)
+    container.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
     layout = QVBoxLayout(container)
     scroll.setWidget(container)
 
@@ -270,6 +384,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         "run_dir": None,
         "run_cfg": None,
         "train_worker": None,
+        "stop_training_requested": False,
         "infer_worker": None,
         "is_training": False,
         "is_inference": False,
@@ -291,10 +406,11 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         "Choose matching image and mask folders, scan pairs, then load examples for review.",
     )
     data_layout = QFormLayout()
+    _stabilize_form(data_layout)
 
     pairing_mode_combo = QComboBox()
     pairing_mode_combo.addItems([
-        "Auto smart pairing",
+        "Auto scan dataset folder",
         "Two folders: images + masks",
         "One folder: mixed images/masks",
         "Manual CSV",
@@ -305,6 +421,12 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     mask_dir_edit = QLineEdit()
     csv_pairing_edit = QLineEdit()
     output_dir_edit = QLineEdit()
+    for line_edit in [
+        dataset_dir_edit, image_dir_edit, mask_dir_edit,
+        csv_pairing_edit, output_dir_edit,
+    ]:
+        _stabilize_line_edit(line_edit)
+        _mirror_text_as_tooltip(line_edit)
 
     btn_browse_dataset_dir = QPushButton("Browse dataset folder")
     btn_browse_image_dir = QPushButton("Browse image folder")
@@ -321,41 +443,55 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     pair_summary_label.setStyleSheet(
         "QLabel { background-color: #273344; color: white; padding: 4px; font-weight: bold; }"
     )
+    _stabilize_label(pair_summary_label)
 
     pair_list = QListWidget()
     pair_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    _stabilize_list(pair_list)
 
     row_dataset = QWidget()
+    _stabilize_row(row_dataset)
     row_dataset_l = QHBoxLayout(row_dataset)
     row_dataset_l.setContentsMargins(0, 0, 0, 0)
-    row_dataset_l.addWidget(dataset_dir_edit)
+    row_dataset_l.addWidget(dataset_dir_edit, 1)
     row_dataset_l.addWidget(btn_browse_dataset_dir)
 
     row_img = QWidget()
+    _stabilize_row(row_img)
     row_img_l = QHBoxLayout(row_img)
     row_img_l.setContentsMargins(0, 0, 0, 0)
-    row_img_l.addWidget(image_dir_edit)
+    row_img_l.addWidget(image_dir_edit, 1)
     row_img_l.addWidget(btn_browse_image_dir)
 
     row_msk = QWidget()
+    _stabilize_row(row_msk)
     row_msk_l = QHBoxLayout(row_msk)
     row_msk_l.setContentsMargins(0, 0, 0, 0)
-    row_msk_l.addWidget(mask_dir_edit)
+    row_msk_l.addWidget(mask_dir_edit, 1)
     row_msk_l.addWidget(btn_browse_mask_dir)
 
     row_csv = QWidget()
+    _stabilize_row(row_csv)
     row_csv_l = QHBoxLayout(row_csv)
     row_csv_l.setContentsMargins(0, 0, 0, 0)
-    row_csv_l.addWidget(csv_pairing_edit)
+    row_csv_l.addWidget(csv_pairing_edit, 1)
     row_csv_l.addWidget(btn_browse_csv_pairing)
 
     row_out = QWidget()
+    _stabilize_row(row_out)
     row_out_l = QHBoxLayout(row_out)
     row_out_l.setContentsMargins(0, 0, 0, 0)
-    row_out_l.addWidget(output_dir_edit)
+    row_out_l.addWidget(output_dir_edit, 1)
     row_out_l.addWidget(btn_browse_output_dir)
 
+    auto_pairing_hint = QLabel(
+        "Choose the dataset root. Auto scan searches TIFFs recursively and detects common "
+        "images/masks, raw/labels, or mixed filename pairs."
+    )
+    _stabilize_label(auto_pairing_hint)
+
     data_layout.addRow("Pairing mode:", pairing_mode_combo)
+    data_layout.addRow(auto_pairing_hint)
     data_layout.addRow("Dataset folder:", row_dataset)
     data_layout.addRow("Images:", row_img)
     data_layout.addRow("Masks:", row_msk)
@@ -378,19 +514,22 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         "Training options",
         "Set model type, patching, validation, and whether this is a new or continued run.",
     )
-    train_layout = QFormLayout()
+    train_layout = QVBoxLayout()
 
     training_mode_combo = QComboBox()
     training_mode_combo.addItems(["new training", "continue training"])
 
     resume_run_edit = QLineEdit()
+    _stabilize_line_edit(resume_run_edit)
+    _mirror_text_as_tooltip(resume_run_edit)
     btn_browse_resume_run = QPushButton("Browse previous run")
     btn_load_resume_meta = QPushButton("Load resume metadata")
 
     row_resume = QWidget()
+    _stabilize_row(row_resume)
     row_resume_l = QHBoxLayout(row_resume)
     row_resume_l.setContentsMargins(0, 0, 0, 0)
-    row_resume_l.addWidget(resume_run_edit)
+    row_resume_l.addWidget(resume_run_edit, 1)
     row_resume_l.addWidget(btn_browse_resume_run)
     row_resume_l.addWidget(btn_load_resume_meta)
 
@@ -398,6 +537,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     resume_summary_box.setReadOnly(True)
     resume_summary_box.setPlaceholderText("Previous run metadata will appear here...")
     resume_summary_box.setMaximumHeight(110)
+    _stabilize_plain_text(resume_summary_box)
 
     resume_data_policy_combo = QComboBox()
     resume_data_policy_combo.addItems([
@@ -433,8 +573,33 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     include_empty_chk = QCheckBox("Include empty-mask patches")
     include_empty_chk.setChecked(False)
 
-    augment_chk = QCheckBox("Use conservative augmentation")
-    augment_chk.setChecked(True)
+    augment_enable_chk = QCheckBox("Enable data augmentation")
+    augment_enable_chk.setChecked(True)
+
+    augment_preset_combo = QComboBox()
+    augment_preset_combo.addItems(["conservative", "balanced", "strong", "custom", "none"])
+
+    augment_flip_h_chk = QCheckBox("Flip horizontally")
+    augment_flip_h_chk.setChecked(True)
+    augment_flip_v_chk = QCheckBox("Flip vertically")
+    augment_flip_v_chk.setChecked(True)
+    augment_rotate_chk = QCheckBox("Rotate")
+    augment_rotate_chk.setChecked(True)
+    augment_rotate_spin = _double_spin(15.0, 0.0, 90.0, 1.0)
+    augment_shear_chk = QCheckBox("Shear")
+    augment_shear_spin = _double_spin(0.0, 0.0, 45.0, 1.0)
+    augment_scale_chk = QCheckBox("Scale")
+    augment_scale_chk.setChecked(True)
+    augment_scale_min_spin = _double_spin(0.90, 0.10, 2.00, 0.05)
+    augment_scale_max_spin = _double_spin(1.10, 0.10, 2.00, 0.05)
+    augment_brightness_chk = QCheckBox("Brightness")
+    augment_brightness_chk.setChecked(True)
+    augment_brightness_min_spin = _double_spin(0.90, 0.10, 3.00, 0.05)
+    augment_brightness_max_spin = _double_spin(1.10, 0.10, 3.00, 0.05)
+    augment_noise_chk = QCheckBox("Gaussian noise")
+    augment_noise_min_spin = _double_spin(0.000, 0.000, 0.500, 0.005)
+    augment_noise_max_spin = _double_spin(0.010, 0.000, 0.500, 0.005)
+    btn_reset_augmentation = QPushButton("Reset augmentation preset")
 
     epochs_spin = QSpinBox()
     epochs_spin.setRange(1, 10000)
@@ -451,44 +616,135 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     val_split_combo.addItems(["0.1", "0.2", "0.25", "0.3"])
     val_split_combo.setCurrentText("0.2")
 
+    for combo in [
+        pairing_mode_combo, training_mode_combo, resume_data_policy_combo,
+        mode_combo, task_combo, model_combo, patch_xy_combo, patch_z_combo,
+        augment_preset_combo, val_mode_combo, val_split_combo,
+    ]:
+        _stabilize_combo(combo)
+
     kfold_spin = QSpinBox()
     kfold_spin.setRange(2, 10)
     kfold_spin.setValue(5)
 
     btn_start_train = QPushButton("Start training")
+    btn_stop_train = QPushButton("Stop training")
+    btn_stop_train.setEnabled(False)
 
     train_status_label = QLabel("Idle")
     train_status_label.setStyleSheet(
         "QLabel { background-color: #444; color: white; padding: 4px; font-weight: bold; }"
     )
+    _stabilize_label(train_status_label)
 
     train_progress = QProgressBar()
     train_progress.setMinimum(0)
     train_progress.setMaximum(100)
     train_progress.setValue(0)
     train_progress.setFormat("Idle")
+    _stabilize_progress(train_progress)
 
-    train_layout.addRow("Run type:", training_mode_combo)
-    train_layout.addRow("Resume run folder:", row_resume)
-    train_layout.addRow("Resume summary:", resume_summary_box)
-    train_layout.addRow("Resume data policy:", resume_data_policy_combo)
-    train_layout.addRow("Data shape:", mode_combo)
-    train_layout.addRow("Segmentation task:", task_combo)
-    train_layout.addRow("Num classes (incl. background):", num_classes_spin)
-    train_layout.addRow("Model:", model_combo)
-    train_layout.addRow("Patch XY:", patch_xy_combo)
-    train_layout.addRow("Patch Z (3D):", patch_z_combo)
-    train_layout.addRow("Overlap %:", overlap_spin)
-    train_layout.addRow(include_empty_chk)
-    train_layout.addRow(augment_chk)
-    train_layout.addRow("Epochs:", epochs_spin)
-    train_layout.addRow("Batch size:", batch_spin)
-    train_layout.addRow("Validation mode:", val_mode_combo)
-    train_layout.addRow("Validation split:", val_split_combo)
-    train_layout.addRow("K folds:", kfold_spin)
-    train_layout.addRow("Status:", train_status_label)
-    train_layout.addRow("Progress:", train_progress)
-    train_layout.addRow(btn_start_train)
+    train_tabs = QTabWidget()
+    train_tabs.setMinimumWidth(0)
+    train_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    run_tab = QWidget()
+    run_form = QFormLayout(run_tab)
+    _stabilize_form(run_form)
+    run_form.addRow("Run type:", training_mode_combo)
+    run_form.addRow("Resume run folder:", row_resume)
+    run_form.addRow("Resume summary:", resume_summary_box)
+    run_form.addRow("Resume data policy:", resume_data_policy_combo)
+    run_form.addRow("Data shape:", mode_combo)
+    run_form.addRow("Segmentation task:", task_combo)
+    run_form.addRow("Num classes (incl. background):", num_classes_spin)
+    run_form.addRow("Model:", model_combo)
+    run_form.addRow("Epochs:", epochs_spin)
+    run_form.addRow("Batch size:", batch_spin)
+
+    patch_tab = QWidget()
+    patch_form = QFormLayout(patch_tab)
+    _stabilize_form(patch_form)
+    patch_form.addRow("Patch XY:", patch_xy_combo)
+    patch_form.addRow("Patch Z (3D):", patch_z_combo)
+    patch_form.addRow("Overlap %:", overlap_spin)
+    patch_form.addRow(include_empty_chk)
+
+    validation_tab = QWidget()
+    validation_form = QFormLayout(validation_tab)
+    _stabilize_form(validation_form)
+    validation_form.addRow("Validation mode:", val_mode_combo)
+    validation_form.addRow("Validation split:", val_split_combo)
+    validation_form.addRow("K folds:", kfold_spin)
+
+    augmentation_tab = QWidget()
+    augmentation_form = QFormLayout(augmentation_tab)
+    _stabilize_form(augmentation_form)
+    scale_row = QWidget()
+    _stabilize_row(scale_row)
+    scale_row_l = QHBoxLayout(scale_row)
+    scale_row_l.setContentsMargins(0, 0, 0, 0)
+    scale_row_l.addWidget(QLabel("min"))
+    scale_row_l.addWidget(augment_scale_min_spin)
+    scale_row_l.addWidget(QLabel("max"))
+    scale_row_l.addWidget(augment_scale_max_spin)
+    brightness_row = QWidget()
+    _stabilize_row(brightness_row)
+    brightness_row_l = QHBoxLayout(brightness_row)
+    brightness_row_l.setContentsMargins(0, 0, 0, 0)
+    brightness_row_l.addWidget(QLabel("min"))
+    brightness_row_l.addWidget(augment_brightness_min_spin)
+    brightness_row_l.addWidget(QLabel("max"))
+    brightness_row_l.addWidget(augment_brightness_max_spin)
+    noise_row = QWidget()
+    _stabilize_row(noise_row)
+    noise_row_l = QHBoxLayout(noise_row)
+    noise_row_l.setContentsMargins(0, 0, 0, 0)
+    noise_row_l.addWidget(QLabel("min"))
+    noise_row_l.addWidget(augment_noise_min_spin)
+    noise_row_l.addWidget(QLabel("max"))
+    noise_row_l.addWidget(augment_noise_max_spin)
+
+    augmentation_form.addRow(augment_enable_chk)
+    augmentation_form.addRow("Preset:", augment_preset_combo)
+    augmentation_form.addRow(augment_flip_h_chk)
+    augmentation_form.addRow(augment_flip_v_chk)
+    augmentation_form.addRow(augment_rotate_chk, augment_rotate_spin)
+    augmentation_form.addRow(augment_shear_chk, augment_shear_spin)
+    augmentation_form.addRow(augment_scale_chk, scale_row)
+    augmentation_form.addRow(augment_brightness_chk, brightness_row)
+    augmentation_form.addRow(augment_noise_chk, noise_row)
+    augmentation_form.addRow(btn_reset_augmentation)
+
+    architecture_tab = QWidget()
+    architecture_form = QFormLayout(architecture_tab)
+    _stabilize_form(architecture_form)
+    architecture_summary_box = QPlainTextEdit()
+    architecture_summary_box.setReadOnly(True)
+    architecture_summary_box.setMinimumHeight(260)
+    _stabilize_plain_text(architecture_summary_box)
+    btn_refresh_architecture = QPushButton("Refresh architecture preview")
+    architecture_form.addRow("Current U-Net:", architecture_summary_box)
+    architecture_form.addRow(btn_refresh_architecture)
+
+    train_tabs.addTab(run_tab, "Run")
+    train_tabs.addTab(patch_tab, "Patching")
+    train_tabs.addTab(validation_tab, "Validation")
+    train_tabs.addTab(augmentation_tab, "Augmentation")
+    train_tabs.addTab(architecture_tab, "Architecture")
+
+    train_layout.addWidget(train_tabs)
+    train_layout.addWidget(QLabel("Status:"))
+    train_layout.addWidget(train_status_label)
+    train_layout.addWidget(QLabel("Progress:"))
+    train_layout.addWidget(train_progress)
+    train_buttons = QWidget()
+    _stabilize_row(train_buttons)
+    train_buttons_l = QHBoxLayout(train_buttons)
+    train_buttons_l.setContentsMargins(0, 0, 0, 0)
+    train_buttons_l.addWidget(btn_start_train)
+    train_buttons_l.addWidget(btn_stop_train)
+    train_layout.addWidget(train_buttons)
     g_train.set_content_layout(train_layout)
 
     layout.addWidget(g_train)
@@ -502,15 +758,19 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         "Load a saved training run, choose new data, and create prediction masks.",
     )
     inf_layout = QFormLayout()
+    _stabilize_form(inf_layout)
 
     run_dir_edit = QLineEdit()
+    _stabilize_line_edit(run_dir_edit)
+    _mirror_text_as_tooltip(run_dir_edit)
     btn_browse_run_dir = QPushButton("Browse run folder")
     btn_load_run_meta = QPushButton("Load run metadata")
 
     row_run = QWidget()
+    _stabilize_row(row_run)
     row_run_l = QHBoxLayout(row_run)
     row_run_l.setContentsMargins(0, 0, 0, 0)
-    row_run_l.addWidget(run_dir_edit)
+    row_run_l.addWidget(run_dir_edit, 1)
     row_run_l.addWidget(btn_browse_run_dir)
     row_run_l.addWidget(btn_load_run_meta)
 
@@ -518,6 +778,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     model_summary_box.setReadOnly(True)
     model_summary_box.setPlaceholderText("Run metadata will appear here...")
     model_summary_box.setMaximumHeight(110)
+    _stabilize_plain_text(model_summary_box)
 
     infer_mode_combo = QComboBox()
     infer_mode_combo.addItems([
@@ -528,25 +789,32 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     ])
 
     infer_input_label = QLabel("Image file:")
+    _stabilize_label(infer_input_label)
     infer_input_edit = QLineEdit()
+    _stabilize_line_edit(infer_input_edit)
+    _mirror_text_as_tooltip(infer_input_edit)
     btn_browse_infer_input = QPushButton("Browse")
 
     row_input = QWidget()
+    _stabilize_row(row_input)
     row_input_l = QHBoxLayout(row_input)
     row_input_l.setContentsMargins(0, 0, 0, 0)
-    row_input_l.addWidget(infer_input_edit)
+    row_input_l.addWidget(infer_input_edit, 1)
     row_input_l.addWidget(btn_browse_infer_input)
 
     infer_strategy_combo = QComboBox()
     infer_strategy_combo.addItems(["auto", "full", "tiled"])
 
     infer_output_edit = QLineEdit()
+    _stabilize_line_edit(infer_output_edit)
+    _mirror_text_as_tooltip(infer_output_edit)
     btn_browse_infer_output = QPushButton("Browse output folder")
 
     row_output = QWidget()
+    _stabilize_row(row_output)
     row_output_l = QHBoxLayout(row_output)
     row_output_l.setContentsMargins(0, 0, 0, 0)
-    row_output_l.addWidget(infer_output_edit)
+    row_output_l.addWidget(infer_output_edit, 1)
     row_output_l.addWidget(btn_browse_infer_output)
 
     infer_load_chk = QCheckBox("Also load prediction into napari")
@@ -559,12 +827,14 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     infer_status_label.setStyleSheet(
         "QLabel { background-color: #444; color: white; padding: 4px; font-weight: bold; }"
     )
+    _stabilize_label(infer_status_label)
 
     infer_progress = QProgressBar()
     infer_progress.setMinimum(0)
     infer_progress.setMaximum(100)
     infer_progress.setValue(0)
     infer_progress.setFormat("Idle")
+    _stabilize_progress(infer_progress)
 
     btn_run_infer = QPushButton("Run inference")
 
@@ -572,6 +842,10 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     infer_log_box.setReadOnly(True)
     infer_log_box.setPlaceholderText("Inference logs appear here...")
     infer_log_box.setMaximumHeight(140)
+    _stabilize_plain_text(infer_log_box)
+
+    for combo in [infer_mode_combo, infer_strategy_combo]:
+        _stabilize_combo(combo)
 
     inf_layout.addRow("Run folder:", row_run)
     inf_layout.addRow("Model summary:", model_summary_box)
@@ -601,6 +875,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     results_box = QPlainTextEdit()
     results_box.setReadOnly(True)
     results_box.setPlaceholderText("Training logs, pair reports, and global results appear here...")
+    _stabilize_plain_text(results_box)
     res_layout.addWidget(results_box)
     g_res.set_content_layout(res_layout)
     layout.addWidget(g_res)
@@ -617,12 +892,25 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         sb = infer_log_box.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+    def _release_training_memory(clear_model: bool = False):
+        if clear_model:
+            state["model"] = None
+            state["history"] = None
+        state["train_worker"] = None
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     def set_training_ui(running: bool):
         state["is_training"] = running
         btn_start_train.setEnabled(not running)
+        btn_stop_train.setEnabled(running)
 
         if running:
             btn_start_train.setText("Training...")
+            btn_stop_train.setText("Stop training")
             train_status_label.setText("Running")
             train_status_label.setStyleSheet(
                 "QLabel { background-color: #b36b00; color: white; padding: 4px; font-weight: bold; }"
@@ -631,6 +919,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             train_progress.setFormat("Starting...")
         else:
             btn_start_train.setText("Start training")
+            btn_stop_train.setText("Stop training")
             train_status_label.setText("Idle")
             train_status_label.setStyleSheet(
                 "QLabel { background-color: #444; color: white; padding: 4px; font-weight: bold; }"
@@ -716,28 +1005,122 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         resume_summary_box.setEnabled(is_continue)
         resume_data_policy_combo.setEnabled(is_continue)
 
+    def _set_augmentation_controls(cfg: AugmentationConfig):
+        widgets = [
+            augment_enable_chk, augment_flip_h_chk, augment_flip_v_chk,
+            augment_rotate_chk, augment_rotate_spin, augment_shear_chk,
+            augment_shear_spin, augment_scale_chk, augment_scale_min_spin,
+            augment_scale_max_spin, augment_brightness_chk,
+            augment_brightness_min_spin, augment_brightness_max_spin,
+            augment_noise_chk, augment_noise_min_spin, augment_noise_max_spin,
+        ]
+        for widget in widgets:
+            widget.blockSignals(True)
+        augment_enable_chk.setChecked(cfg.enabled)
+        augment_flip_h_chk.setChecked(cfg.flip_horizontal)
+        augment_flip_v_chk.setChecked(cfg.flip_vertical)
+        augment_rotate_chk.setChecked(cfg.rotate)
+        augment_rotate_spin.setValue(cfg.rotate_degrees)
+        augment_shear_chk.setChecked(cfg.shear)
+        augment_shear_spin.setValue(cfg.shear_degrees)
+        augment_scale_chk.setChecked(cfg.scale)
+        augment_scale_min_spin.setValue(cfg.scale_min)
+        augment_scale_max_spin.setValue(cfg.scale_max)
+        augment_brightness_chk.setChecked(cfg.brightness)
+        augment_brightness_min_spin.setValue(cfg.brightness_min)
+        augment_brightness_max_spin.setValue(cfg.brightness_max)
+        augment_noise_chk.setChecked(cfg.gaussian_noise)
+        augment_noise_min_spin.setValue(cfg.noise_min)
+        augment_noise_max_spin.setValue(cfg.noise_max)
+        for widget in widgets:
+            widget.blockSignals(False)
+
+    def _current_augmentation_config() -> AugmentationConfig:
+        return AugmentationConfig(
+            enabled=bool(augment_enable_chk.isChecked()) and augment_preset_combo.currentText() != "none",
+            preset=augment_preset_combo.currentText(),
+            flip_horizontal=bool(augment_flip_h_chk.isChecked()),
+            flip_vertical=bool(augment_flip_v_chk.isChecked()),
+            rotate=bool(augment_rotate_chk.isChecked()),
+            rotate_degrees=float(augment_rotate_spin.value()),
+            shear=bool(augment_shear_chk.isChecked()),
+            shear_degrees=float(augment_shear_spin.value()),
+            scale=bool(augment_scale_chk.isChecked()),
+            scale_min=float(augment_scale_min_spin.value()),
+            scale_max=float(augment_scale_max_spin.value()),
+            brightness=bool(augment_brightness_chk.isChecked()),
+            brightness_min=float(augment_brightness_min_spin.value()),
+            brightness_max=float(augment_brightness_max_spin.value()),
+            gaussian_noise=bool(augment_noise_chk.isChecked()),
+            noise_min=float(augment_noise_min_spin.value()),
+            noise_max=float(augment_noise_max_spin.value()),
+        )
+
+    def _apply_augmentation_preset(*_args):
+        preset = augment_preset_combo.currentText()
+        if preset == "custom":
+            return
+        _set_augmentation_controls(AugmentationConfig.preset_config(preset))
+
+    def _mark_augmentation_custom(*_args):
+        if augment_preset_combo.currentText() != "custom":
+            augment_preset_combo.blockSignals(True)
+            augment_preset_combo.setCurrentText("custom")
+            augment_preset_combo.blockSignals(False)
+
+    def _refresh_architecture_preview(*_args):
+        out_channels = 1 if task_combo.currentText() == "binary" else int(num_classes_spin.value())
+        architecture_summary_box.setPlainText(
+            _unet_architecture_summary(mode_combo.currentText(), 1, out_channels)
+        )
+
     mode_combo.currentTextChanged.connect(_sync_mode_ui)
     task_combo.currentTextChanged.connect(_sync_task_ui)
     infer_mode_combo.currentTextChanged.connect(_sync_infer_ui)
     training_mode_combo.currentTextChanged.connect(_sync_training_mode_ui)
+    augment_preset_combo.currentTextChanged.connect(_apply_augmentation_preset)
+    btn_reset_augmentation.clicked.connect(_apply_augmentation_preset)
+    btn_refresh_architecture.clicked.connect(_refresh_architecture_preview)
+    mode_combo.currentTextChanged.connect(_refresh_architecture_preview)
+    task_combo.currentTextChanged.connect(_refresh_architecture_preview)
+    num_classes_spin.valueChanged.connect(_refresh_architecture_preview)
+
+    for widget in [
+        augment_enable_chk, augment_flip_h_chk, augment_flip_v_chk,
+        augment_rotate_chk, augment_shear_chk, augment_scale_chk,
+        augment_brightness_chk, augment_noise_chk,
+    ]:
+        widget.toggled.connect(_mark_augmentation_custom)
+
+    for widget in [
+        augment_rotate_spin, augment_shear_spin, augment_scale_min_spin,
+        augment_scale_max_spin, augment_brightness_min_spin,
+        augment_brightness_max_spin, augment_noise_min_spin, augment_noise_max_spin,
+    ]:
+        widget.valueChanged.connect(_mark_augmentation_custom)
 
     def _sync_pairing_ui():
         mode = pairing_mode_combo.currentText()
-        is_auto = mode == "Auto smart pairing"
+        is_auto = mode == "Auto scan dataset folder"
         is_two = mode == "Two folders: images + masks"
         is_one = mode == "One folder: mixed images/masks"
         is_csv = mode == "Manual CSV"
 
         dataset_dir_edit.setEnabled(is_auto or is_one)
         btn_browse_dataset_dir.setEnabled(is_auto or is_one)
+        row_dataset.setVisible(is_auto or is_one)
+        auto_pairing_hint.setVisible(is_auto)
 
-        image_dir_edit.setEnabled(is_auto or is_two)
-        btn_browse_image_dir.setEnabled(is_auto or is_two)
-        mask_dir_edit.setEnabled(is_auto or is_two)
-        btn_browse_mask_dir.setEnabled(is_auto or is_two)
+        image_dir_edit.setEnabled(is_two)
+        btn_browse_image_dir.setEnabled(is_two)
+        row_img.setVisible(is_two)
+        mask_dir_edit.setEnabled(is_two)
+        btn_browse_mask_dir.setEnabled(is_two)
+        row_msk.setVisible(is_two)
 
         csv_pairing_edit.setEnabled(is_csv)
         btn_browse_csv_pairing.setEnabled(is_csv)
+        row_csv.setVisible(is_csv)
 
     pairing_mode_combo.currentTextChanged.connect(_sync_pairing_ui)
 
@@ -745,6 +1128,8 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     _sync_task_ui()
     _sync_infer_ui()
     _sync_training_mode_ui()
+    _apply_augmentation_preset()
+    _refresh_architecture_preview()
     _sync_pairing_ui()
 
     def _pair_status_icon(status: str) -> str:
@@ -777,11 +1162,11 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         validate_shapes = bool(validate_shapes_chk.isChecked())
 
         try:
-            if mode == "Auto smart pairing":
+            if mode == "Auto scan dataset folder":
+                if not dataset_dir:
+                    raise ValueError("Choose a dataset folder first.")
                 report = pair_auto(
-                    dataset_dir=dataset_dir or None,
-                    image_dir=image_dir or None,
-                    mask_dir=mask_dir or None,
+                    dataset_dir=dataset_dir,
                     validate_shapes=validate_shapes,
                 )
             elif mode == "Two folders: images + masks":
@@ -795,7 +1180,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             elif mode == "One folder: mixed images/masks":
                 if not dataset_dir:
                     raise ValueError("Choose a dataset folder first.")
-                report = pair_mixed_folder(
+                report = pair_dataset_folder_auto(
                     dataset_dir,
                     validate_shapes=validate_shapes,
                 )
@@ -910,6 +1295,13 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
 
             out_channels = int(cfg.get("out_channels", 1))
             num_classes_spin.setValue(out_channels if out_channels >= 1 else 1)
+            aug_cfg = cfg.get("augmentation")
+            if isinstance(aug_cfg, dict):
+                aug = AugmentationConfig.from_dict(aug_cfg)
+                augment_preset_combo.setCurrentText(
+                    aug.preset if aug.preset in {"none", "conservative", "balanced", "strong", "custom"} else "custom"
+                )
+                _set_augmentation_controls(aug)
 
             lines = [
                 f"mode_2d_or_3d: {cfg.get('mode_2d_or_3d')}",
@@ -918,6 +1310,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 f"patch_xy: {cfg.get('patch_xy')}",
                 f"patch_z: {cfg.get('patch_z')}",
                 f"out_channels: {cfg.get('out_channels')}",
+                f"augmentation: {cfg.get('augmentation', {}).get('preset', 'not recorded') if isinstance(cfg.get('augmentation'), dict) else 'not recorded'}",
             ]
             if summary:
                 lines.extend([
@@ -1038,6 +1431,13 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
 
     def start_training():
         try:
+            if state["is_training"]:
+                show_warning("Training is already running.")
+                return
+
+            state["stop_training_requested"] = False
+            _release_training_memory(clear_model=True)
+
             cfg = _build_run_config()
             if cfg.task_type == "multiclass" and cfg.out_channels < 2:
                 raise ValueError("Multiclass requires at least 2 classes including background.")
@@ -1060,6 +1460,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             training_pairs = _collect_training_pairs()
             image_paths = [p["image_path"] for p in training_pairs]
             mask_paths = [p["mask_path"] for p in training_pairs]
+            augmentation_cfg = _current_augmentation_config()
 
             log(f"Training pairs used: {len(training_pairs)}")
 
@@ -1089,7 +1490,8 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 "patch_z": cfg.patch_z,
                 "overlap_percent": cfg.overlap_percent,
                 "include_empty_mask": cfg.include_empty_mask,
-                "augment": bool(augment_chk.isChecked()),
+                "augment": bool(augmentation_cfg.enabled),
+                "augment_config": augmentation_cfg.to_dict(),
                 "cache_arrays": True,
             }
 
@@ -1098,6 +1500,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 "training_mode": training_mode_combo.currentText(),
                 "resume_from_run_dir": resume_run_dir if is_continue else "",
                 "resume_data_policy": resume_data_policy_combo.currentText() if is_continue else "",
+                "augmentation": ds_kwargs["augment_config"],
             })
             save_json(run_dir / "config.json", cfg_dict)
 
@@ -1110,9 +1513,20 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             @thread_worker(start_thread=False)
             def _train():
                 from ..training.datasets import PatchDataset
-                from ..training.trainer import build_model, build_loss, _run_epoch
+                from ..training.trainer import (
+                    TrainingCancelled,
+                    build_model,
+                    build_loss,
+                    _run_epoch,
+                )
                 from torch.utils.data import DataLoader, random_split
                 import torch
+
+                def _should_stop():
+                    return bool(state.get("stop_training_requested", False))
+
+                if _should_stop():
+                    raise TrainingCancelled("Training stopped by user.")
 
                 yield {
                     "kind": "status",
@@ -1126,6 +1540,10 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 )
 
                 n_total = len(ds)
+                if _should_stop():
+                    del ds
+                    raise TrainingCancelled("Training stopped by user.")
+
                 yield {
                     "kind": "status",
                     "message": f"PatchDataset ready. Total samples: {n_total}"
@@ -1191,13 +1609,32 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 best_state = None
 
                 for epoch in range(train_cfg.epochs):
+                    if _should_stop():
+                        raise TrainingCancelled("Training stopped by user.")
+
                     yield {
                         "kind": "status",
                         "message": f"Epoch {epoch + 1}/{train_cfg.epochs} started..."
                     }
 
-                    train_loss, train_metrics = _run_epoch(model, train_loader, loss_fn, optimizer, train_cfg, train=True)
-                    val_loss, val_metrics = _run_epoch(model, val_loader, loss_fn, optimizer, train_cfg, train=False)
+                    train_loss, train_metrics = _run_epoch(
+                        model,
+                        train_loader,
+                        loss_fn,
+                        optimizer,
+                        train_cfg,
+                        train=True,
+                        should_stop=_should_stop,
+                    )
+                    val_loss, val_metrics = _run_epoch(
+                        model,
+                        val_loader,
+                        loss_fn,
+                        optimizer,
+                        train_cfg,
+                        train=False,
+                        should_stop=_should_stop,
+                    )
 
                     row = {
                         "epoch": epoch + 1,
@@ -1231,6 +1668,20 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             worker = _train()
             state["train_worker"] = worker
 
+            def _mark_training_stopped():
+                train_status_label.setText("Stopped")
+                train_status_label.setStyleSheet(
+                    "QLabel { background-color: #6b5131; color: white; padding: 4px; font-weight: bold; }"
+                )
+                train_progress.setFormat("Stopped")
+                btn_start_train.setEnabled(True)
+                btn_stop_train.setEnabled(False)
+                btn_start_train.setText("Start training")
+                btn_stop_train.setText("Stop training")
+                state["is_training"] = False
+                state["stop_training_requested"] = False
+                _release_training_memory(clear_model=True)
+
             def _on_yielded(payload):
                 if payload.get("kind") == "status":
                     msg = payload["message"]
@@ -1256,6 +1707,12 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                     )
 
             def _on_returned(result):
+                if state.get("stop_training_requested", False):
+                    log("Training stopped by user. Model state was discarded and GPU cache was cleared if available.")
+                    show_info("Training stopped.")
+                    _mark_training_stopped()
+                    return
+
                 model, history = result
                 state["model"] = model
                 state["history"] = history
@@ -1291,10 +1748,20 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 log(f"Training complete. Best val Dice={best['val_dice']:.4f}")
                 show_info("Training complete.")
                 btn_start_train.setEnabled(True)
+                btn_stop_train.setEnabled(False)
                 btn_start_train.setText("Start training")
                 state["is_training"] = False
+                state["train_worker"] = None
+                state["stop_training_requested"] = False
 
             def _on_error(exc):
+                cancelled = exc.__class__.__name__ == "TrainingCancelled" or "stopped by user" in str(exc).lower()
+                if cancelled:
+                    log("Training stopped by user. Model state was discarded and GPU cache was cleared if available.")
+                    show_info("Training stopped.")
+                    _mark_training_stopped()
+                    return
+
                 train_status_label.setText("Error")
                 train_status_label.setStyleSheet(
                     "QLabel { background-color: #9b1c1c; color: white; padding: 4px; font-weight: bold; }"
@@ -1303,18 +1770,49 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 log(f"Training error: {exc}")
                 show_warning(str(exc))
                 btn_start_train.setEnabled(True)
+                btn_stop_train.setEnabled(False)
                 btn_start_train.setText("Start training")
                 state["is_training"] = False
+                state["stop_training_requested"] = False
+                _release_training_memory(clear_model=True)
+
+            def _on_finished():
+                if state.get("stop_training_requested", False) and state.get("is_training", False):
+                    log("Training worker stopped. Model state was discarded and GPU cache was cleared if available.")
+                    _mark_training_stopped()
 
             worker.yielded.connect(_on_yielded)
             worker.returned.connect(_on_returned)
             worker.errored.connect(_on_error)
+            if hasattr(worker, "finished"):
+                worker.finished.connect(_on_finished)
             worker.start()
 
         except Exception as e:
             set_training_ui(False)
             show_warning(str(e))
             log(f"Start training failed: {e}")
+
+    def stop_training():
+        if not state.get("is_training", False):
+            return
+
+        state["stop_training_requested"] = True
+        btn_stop_train.setEnabled(False)
+        btn_stop_train.setText("Stopping...")
+        train_status_label.setText("Stopping")
+        train_status_label.setStyleSheet(
+            "QLabel { background-color: #6b5131; color: white; padding: 4px; font-weight: bold; }"
+        )
+        train_progress.setFormat("Stopping after current batch...")
+        log("Stop requested. Training will stop after the current batch.")
+
+        worker = state.get("train_worker")
+        if worker is not None:
+            try:
+                worker.quit()
+            except Exception:
+                pass
 
     def load_run_meta():
         run_dir = run_dir_edit.text().strip()
@@ -1547,6 +2045,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     btn_load_resume_meta.clicked.connect(load_resume_meta)
 
     btn_start_train.clicked.connect(start_training)
+    btn_stop_train.clicked.connect(stop_training)
 
     btn_browse_run_dir.clicked.connect(lambda: browse_dir(run_dir_edit))
     btn_load_run_meta.clicked.connect(load_run_meta)

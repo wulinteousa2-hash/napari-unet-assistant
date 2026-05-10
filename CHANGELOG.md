@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 - Model registry and training workflow update
+## 0.5.0 - Guided model selection and run summaries
 
 ### Added
 
@@ -27,6 +27,8 @@
 - Updated inference loading so checkpoints are restored with the saved U-Net base-channel width.
 - Updated training and inference to rebuild models through the registry from saved backend/model metadata.
 - Clarified validation behavior by keeping split validation as the active mode and writing `validation.json` for each run.
+- Added training-start model/configuration logging and a human-readable `run_summary.txt` in each run folder.
+- Added short tooltips across pairing, training, validation, augmentation, architecture, inference, and results controls.
 - Improved training startup and shutdown handling by releasing old model memory before a new run and after cancellation or errors.
 
 ### Notes

@@ -130,6 +130,10 @@ def _mirror_text_as_tooltip(line_edit: QLineEdit):
     line_edit.textChanged.connect(line_edit.setToolTip)
 
 
+def _set_tip(widget: QWidget, text: str):
+    widget.setToolTip(text)
+
+
 def _estimate_unet_params_2d(in_channels: int, out_channels: int, base: int) -> int:
     def conv(in_ch: int, out_ch: int, k: int = 3) -> int:
         return out_ch * in_ch * k * k + out_ch
@@ -213,6 +217,29 @@ def _canonical_model_name(model_backend: str, model_name: str | None) -> str:
     if model_backend == "builtin" and model_name in {"unet2d", "unet3d", None, ""}:
         return "unet"
     return model_name or "unet"
+
+
+def _training_config_summary(cfg: RunConfig, augmentation_cfg: AugmentationConfig) -> list[str]:
+    model_params = cfg.model_params or {}
+    return [
+        f"Mode: {cfg.mode_2d_or_3d}",
+        f"Task: {cfg.task_type}",
+        f"Model backend: {cfg.model_backend}",
+        f"Model family: {cfg.model_name}",
+        f"Model capacity: {model_params.get('capacity', _capacity_for_model_base(cfg.mode_2d_or_3d, cfg.model_base))}",
+        f"Model base channels: {cfg.model_base}",
+        f"Backbone / encoder: {model_params.get('encoder_name', 'plain')}",
+        f"Encoder weights: {model_params.get('encoder_weights', 'none')}",
+        f"Patch XY: {cfg.patch_xy}",
+        f"Patch Z: {cfg.patch_z}",
+        f"Overlap: {cfg.overlap_percent}%",
+        f"Include empty-mask patches: {cfg.include_empty_mask}",
+        f"Augmentation: {augmentation_cfg.preset} (enabled={augmentation_cfg.enabled})",
+        f"Epochs: {cfg.epochs}",
+        f"Batch size: {cfg.batch_size}",
+        f"Learning rate: {cfg.learning_rate}",
+        f"Validation: {cfg.val_mode}, split={cfg.val_split}, k_folds={cfg.k_folds}",
+    ]
 
 
 def _unet_architecture_summary(mode: str, in_channels: int, out_channels: int, base: int) -> str:
@@ -533,6 +560,21 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     validate_shapes_chk = QCheckBox("Quick-check image/mask shapes during scan")
     validate_shapes_chk.setChecked(True)
 
+    _set_tip(pairing_mode_combo, "How image and mask files should be matched.")
+    _set_tip(dataset_dir_edit, "Dataset root for recursive auto scan or mixed-folder pairing.")
+    _set_tip(image_dir_edit, "Folder containing input images for two-folder pairing.")
+    _set_tip(mask_dir_edit, "Folder containing label masks for two-folder pairing.")
+    _set_tip(csv_pairing_edit, "CSV with image_path and mask_path columns.")
+    _set_tip(output_dir_edit, "Run folder for configs, metrics, checkpoints, and predictions.")
+    _set_tip(btn_browse_dataset_dir, "Choose the dataset root folder.")
+    _set_tip(btn_browse_image_dir, "Choose the image folder.")
+    _set_tip(btn_browse_mask_dir, "Choose the mask folder.")
+    _set_tip(btn_browse_csv_pairing, "Choose a manual pairing CSV.")
+    _set_tip(btn_browse_output_dir, "Choose where this training run will be saved.")
+    _set_tip(btn_scan_pairs, "Find valid image-mask pairs before training.")
+    _set_tip(btn_load_selected_pair, "Open selected training pairs in napari for visual review.")
+    _set_tip(validate_shapes_chk, "Check that each image and mask has matching spatial shape.")
+
     pair_summary_label = QLabel("No pair scan yet.")
     pair_summary_label.setStyleSheet(
         "QLabel { background-color: #273344; color: white; padding: 4px; font-weight: bold; }"
@@ -542,6 +584,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     pair_list = QListWidget()
     pair_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
     _stabilize_list(pair_list)
+    _set_tip(pair_list, "Proposed image-mask pairs with confidence and status.")
 
     row_dataset = QWidget()
     _stabilize_row(row_dataset)
@@ -583,6 +626,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         "images/masks, raw/labels, or mixed filename pairs."
     )
     _stabilize_label(auto_pairing_hint)
+    _set_tip(auto_pairing_hint, "Auto mode works best with folders named images/masks or raw/labels.")
 
     data_layout.addRow("Pairing mode:", pairing_mode_combo)
     data_layout.addRow(auto_pairing_hint)
@@ -612,12 +656,16 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
 
     training_mode_combo = QComboBox()
     training_mode_combo.addItems(["new training", "continue training"])
+    _set_tip(training_mode_combo, "Start fresh or continue from a compatible previous run.")
 
     resume_run_edit = QLineEdit()
     _stabilize_line_edit(resume_run_edit)
     _mirror_text_as_tooltip(resume_run_edit)
+    _set_tip(resume_run_edit, "Previous run folder used for continue training.")
     btn_browse_resume_run = QPushButton("Browse previous run")
     btn_load_resume_meta = QPushButton("Load resume metadata")
+    _set_tip(btn_browse_resume_run, "Choose a previous run folder.")
+    _set_tip(btn_load_resume_meta, "Load previous config so compatible settings can be checked.")
 
     row_resume = QWidget()
     _stabilize_row(row_resume)
@@ -632,96 +680,132 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     resume_summary_box.setPlaceholderText("Previous run metadata will appear here...")
     resume_summary_box.setMaximumHeight(110)
     _stabilize_plain_text(resume_summary_box)
+    _set_tip(resume_summary_box, "Summary of the selected resume run.")
 
     resume_data_policy_combo = QComboBox()
     resume_data_policy_combo.addItems([
         "use new data only",
         "merge previous + new data",
     ])
+    _set_tip(resume_data_policy_combo, "Choose whether continued training uses only new pairs or merges old pairs.")
 
     mode_combo = QComboBox()
     mode_combo.addItems(["2d", "3d"])
+    _set_tip(mode_combo, "Choose 2D images or 3D volumes.")
 
     task_combo = QComboBox()
     task_combo.addItems(["binary", "multiclass"])
+    _set_tip(task_combo, "Binary predicts foreground/background; multiclass predicts label IDs.")
 
     num_classes_spin = QSpinBox()
     num_classes_spin.setRange(1, 255)
     num_classes_spin.setValue(5)
+    _set_tip(num_classes_spin, "Total classes including background for multiclass training.")
 
     model_backend_combo = QComboBox()
     model_backend_combo.addItems(["builtin", "monai", "nnunet", "smp"])
+    _set_tip(model_backend_combo, "Implementation source for model families.")
 
     model_combo = QComboBox()
     model_combo.addItems(["unet"])
+    _set_tip(model_combo, "Segmentation architecture family to train.")
 
     encoder_combo = QComboBox()
     encoder_combo.addItems(["plain"])
+    _set_tip(encoder_combo, "Feature extractor backbone when the family supports one.")
 
     encoder_weights_combo = QComboBox()
     encoder_weights_combo.addItems(["none"])
+    _set_tip(encoder_weights_combo, "Optional pretrained encoder weights, if supported.")
 
     model_capacity_combo = QComboBox()
     model_capacity_combo.addItems(["standard", "large", "xlarge"])
     model_capacity_combo.setCurrentText("large")
+    _set_tip(model_capacity_combo, "Wider models can learn more detail but use more GPU memory.")
 
     patch_xy_combo = QComboBox()
     patch_xy_combo.addItems(["64", "128", "256", "512", "1024"])
     patch_xy_combo.setCurrentText("256")
+    _set_tip(patch_xy_combo, "XY patch size used for training and tiled inference.")
 
     patch_z_combo = QComboBox()
     patch_z_combo.addItems(["8", "16", "32", "64"])
     patch_z_combo.setCurrentText("16")
+    _set_tip(patch_z_combo, "Z depth per 3D patch; ignored for 2D training.")
 
     overlap_spin = QSpinBox()
     overlap_spin.setRange(0, 90)
     overlap_spin.setValue(0)
+    _set_tip(overlap_spin, "Patch overlap percentage; higher gives more samples and smoother tiling.")
 
     include_empty_chk = QCheckBox("Include empty-mask patches")
     include_empty_chk.setChecked(False)
+    _set_tip(include_empty_chk, "Include patches with no foreground mask pixels.")
 
     augment_enable_chk = QCheckBox("Enable data augmentation")
     augment_enable_chk.setChecked(True)
+    _set_tip(augment_enable_chk, "Randomly transform training patches to improve generalization.")
 
     augment_preset_combo = QComboBox()
     augment_preset_combo.addItems(["conservative", "balanced", "strong", "custom", "none"])
+    _set_tip(augment_preset_combo, "Preset strength for training-time augmentation.")
 
     augment_flip_h_chk = QCheckBox("Flip horizontally")
     augment_flip_h_chk.setChecked(True)
+    _set_tip(augment_flip_h_chk, "Randomly mirror patches left-right.")
     augment_flip_v_chk = QCheckBox("Flip vertically")
     augment_flip_v_chk.setChecked(True)
+    _set_tip(augment_flip_v_chk, "Randomly mirror patches up-down.")
     augment_rotate_chk = QCheckBox("Rotate")
     augment_rotate_chk.setChecked(True)
     augment_rotate_spin = _double_spin(15.0, 0.0, 90.0, 1.0)
+    _set_tip(augment_rotate_chk, "Randomly rotate image and mask together.")
+    _set_tip(augment_rotate_spin, "Maximum random rotation in degrees.")
     augment_shear_chk = QCheckBox("Shear")
     augment_shear_spin = _double_spin(0.0, 0.0, 45.0, 1.0)
+    _set_tip(augment_shear_chk, "Randomly slant image and mask together.")
+    _set_tip(augment_shear_spin, "Maximum random shear in degrees.")
     augment_scale_chk = QCheckBox("Scale")
     augment_scale_chk.setChecked(True)
     augment_scale_min_spin = _double_spin(0.90, 0.10, 2.00, 0.05)
     augment_scale_max_spin = _double_spin(1.10, 0.10, 2.00, 0.05)
+    _set_tip(augment_scale_chk, "Randomly zoom patches in or out.")
+    _set_tip(augment_scale_min_spin, "Minimum random scale factor.")
+    _set_tip(augment_scale_max_spin, "Maximum random scale factor.")
     augment_brightness_chk = QCheckBox("Brightness")
     augment_brightness_chk.setChecked(True)
     augment_brightness_min_spin = _double_spin(0.90, 0.10, 3.00, 0.05)
     augment_brightness_max_spin = _double_spin(1.10, 0.10, 3.00, 0.05)
+    _set_tip(augment_brightness_chk, "Randomly vary image intensity; masks are unchanged.")
+    _set_tip(augment_brightness_min_spin, "Minimum brightness multiplier.")
+    _set_tip(augment_brightness_max_spin, "Maximum brightness multiplier.")
     augment_noise_chk = QCheckBox("Gaussian noise")
     augment_noise_min_spin = _double_spin(0.000, 0.000, 0.500, 0.005)
     augment_noise_max_spin = _double_spin(0.010, 0.000, 0.500, 0.005)
     btn_reset_augmentation = QPushButton("Reset augmentation preset")
+    _set_tip(augment_noise_chk, "Add random noise to image patches only.")
+    _set_tip(augment_noise_min_spin, "Minimum noise standard deviation.")
+    _set_tip(augment_noise_max_spin, "Maximum noise standard deviation.")
+    _set_tip(btn_reset_augmentation, "Restore controls from the selected preset.")
 
     epochs_spin = QSpinBox()
     epochs_spin.setRange(1, 10000)
     epochs_spin.setValue(5)
+    _set_tip(epochs_spin, "Number of complete passes through the training patches.")
 
     batch_spin = QSpinBox()
     batch_spin.setRange(1, 256)
     batch_spin.setValue(2)
+    _set_tip(batch_spin, "Patches processed per optimizer step; lower this if GPU memory is tight.")
 
     val_mode_combo = QComboBox()
     val_mode_combo.addItems(["split"])
+    _set_tip(val_mode_combo, "Current release uses one train/validation split.")
 
     val_split_combo = QComboBox()
     val_split_combo.addItems(["0.1", "0.2", "0.25", "0.3"])
     val_split_combo.setCurrentText("0.2")
+    _set_tip(val_split_combo, "Fraction of patches held out for validation.")
 
     for combo in [
         pairing_mode_combo, training_mode_combo, resume_data_policy_combo,
@@ -734,10 +818,13 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     kfold_spin.setRange(2, 10)
     kfold_spin.setValue(5)
     kfold_spin.setEnabled(False)
+    _set_tip(kfold_spin, "Reserved for future k-fold cross-validation.")
 
     btn_start_train = QPushButton("Start training")
     btn_stop_train = QPushButton("Stop training")
     btn_stop_train.setEnabled(False)
+    _set_tip(btn_start_train, "Start training with the current settings.")
+    _set_tip(btn_stop_train, "Request cancellation and release the UI immediately.")
 
     train_status_label = QLabel("Idle")
     train_status_label.setStyleSheet(
@@ -836,6 +923,8 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     architecture_summary_box.setMinimumHeight(260)
     _stabilize_plain_text(architecture_summary_box)
     btn_refresh_architecture = QPushButton("Refresh architecture preview")
+    _set_tip(architecture_summary_box, "Preview of selected model size and layer flow.")
+    _set_tip(btn_refresh_architecture, "Update the architecture preview from current controls.")
     architecture_form.addRow("Current U-Net:", architecture_summary_box)
     architecture_form.addRow(btn_refresh_architecture)
 
@@ -877,6 +966,9 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     _mirror_text_as_tooltip(run_dir_edit)
     btn_browse_run_dir = QPushButton("Browse run folder")
     btn_load_run_meta = QPushButton("Load run metadata")
+    _set_tip(run_dir_edit, "Training run folder containing config.json and best_model.pt.")
+    _set_tip(btn_browse_run_dir, "Choose a saved training run folder.")
+    _set_tip(btn_load_run_meta, "Load saved model settings for review and inference.")
 
     row_run = QWidget()
     _stabilize_row(row_run)
@@ -891,6 +983,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     model_summary_box.setPlaceholderText("Run metadata will appear here...")
     model_summary_box.setMaximumHeight(110)
     _stabilize_plain_text(model_summary_box)
+    _set_tip(model_summary_box, "Summary of the loaded model and best validation metrics.")
 
     infer_mode_combo = QComboBox()
     infer_mode_combo.addItems([
@@ -899,6 +992,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
         "single 3D volume",
         "folder of 3D volumes",
     ])
+    _set_tip(infer_mode_combo, "Choose the type of input to predict.")
 
     infer_input_label = QLabel("Image file:")
     _stabilize_label(infer_input_label)
@@ -906,6 +1000,8 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     _stabilize_line_edit(infer_input_edit)
     _mirror_text_as_tooltip(infer_input_edit)
     btn_browse_infer_input = QPushButton("Browse")
+    _set_tip(infer_input_edit, "Image, volume, or folder to run inference on.")
+    _set_tip(btn_browse_infer_input, "Choose inference input.")
 
     row_input = QWidget()
     _stabilize_row(row_input)
@@ -916,11 +1012,14 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
 
     infer_strategy_combo = QComboBox()
     infer_strategy_combo.addItems(["auto", "full", "tiled"])
+    _set_tip(infer_strategy_combo, "Auto picks full or tiled prediction based on image size and model mode.")
 
     infer_output_edit = QLineEdit()
     _stabilize_line_edit(infer_output_edit)
     _mirror_text_as_tooltip(infer_output_edit)
     btn_browse_infer_output = QPushButton("Browse output folder")
+    _set_tip(infer_output_edit, "Folder where prediction TIFFs are saved.")
+    _set_tip(btn_browse_infer_output, "Choose prediction output folder.")
 
     row_output = QWidget()
     _stabilize_row(row_output)
@@ -931,9 +1030,11 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
 
     infer_load_chk = QCheckBox("Also load prediction into napari")
     infer_load_chk.setChecked(True)
+    _set_tip(infer_load_chk, "Show the predicted mask in napari after inference.")
 
     infer_overwrite_chk = QCheckBox("Overwrite existing prediction TIFF")
     infer_overwrite_chk.setChecked(False)
+    _set_tip(infer_overwrite_chk, "Replace prediction files if they already exist.")
 
     infer_status_label = QLabel("Idle")
     infer_status_label.setStyleSheet(
@@ -949,12 +1050,14 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     _stabilize_progress(infer_progress)
 
     btn_run_infer = QPushButton("Run inference")
+    _set_tip(btn_run_infer, "Run the loaded model on the selected input.")
 
     infer_log_box = QPlainTextEdit()
     infer_log_box.setReadOnly(True)
     infer_log_box.setPlaceholderText("Inference logs appear here...")
     infer_log_box.setMaximumHeight(140)
     _stabilize_plain_text(infer_log_box)
+    _set_tip(infer_log_box, "Inference progress and output paths.")
 
     for combo in [infer_mode_combo, infer_strategy_combo]:
         _stabilize_combo(combo)
@@ -988,6 +1091,7 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
     results_box.setReadOnly(True)
     results_box.setPlaceholderText("Training logs, pair reports, and global results appear here...")
     _stabilize_plain_text(results_box)
+    _set_tip(results_box, "Training logs, pair reports, validation summaries, and run messages.")
     res_layout.addWidget(results_box)
     g_res.set_content_layout(res_layout)
     layout.addWidget(g_res)
@@ -1692,6 +1796,9 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
             augmentation_cfg = _current_augmentation_config()
 
             log(f"Training pairs used: {len(training_pairs)}")
+            log("Training configuration:")
+            for line in _training_config_summary(cfg, augmentation_cfg):
+                log(f"  {line}")
 
             # save actual training pairs used in this run
             save_csv_rows(
@@ -1736,6 +1843,17 @@ def toolbox_widget(napari_viewer=None) -> QWidget:
                 "augmentation": ds_kwargs["augment_config"],
             })
             save_json(run_dir / "config.json", cfg_dict)
+            (run_dir / "run_summary.txt").write_text(
+                "\n".join([
+                    "napari-unet-assistant run summary",
+                    "",
+                    * _training_config_summary(cfg, augmentation_cfg),
+                    "",
+                    f"Training pairs used: {len(training_pairs)}",
+                    f"Output folder: {run_dir}",
+                ]) + "\n",
+                encoding="utf-8",
+            )
 
             set_training_ui(True)
             if is_continue:

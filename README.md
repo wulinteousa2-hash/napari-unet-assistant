@@ -6,7 +6,7 @@ It is designed for users who already have image-mask training data and want to p
 
 This plugin is separate from SAM-based annotation workflows. Its focus is conventional supervised U-Net training from existing image-mask pairs.
 
-## What's new in 0.4.0
+## What's new in 0.5.0
 
 - Added recursive dataset-folder auto pairing for TIFF datasets with `images`/`masks`, `raw`/`labels`, mixed-folder, and nested layouts.
 - Added folder-name role hints so dataset folders can guide image-mask pairing even when filenames are less explicit.
@@ -18,6 +18,7 @@ This plugin is separate from SAM-based annotation workflows. Its focus is conven
 - Added saving and loading of augmentation settings in run configuration metadata.
 - Added a training stop button that cancels after the current batch, discards the interrupted model state, and clears GPU cache when available.
 - Added a U-Net architecture preview for the selected 2D/3D mode and output-channel configuration.
+- Added short tooltips across the main controls to explain settings in place.
 - Improved the training UI layout with clearer tabs and more stable dock-widget sizing.
 
 ## Highlights
@@ -221,12 +222,15 @@ K-fold cross-validation is not active in this release.
 
 Each run writes `validation.json` with the active validation mode, split fraction, random seed, total patch count, train patch count, and validation patch count. The training log also reports the same split. Per-epoch validation metrics are written to `history.csv`.
 
+At training start, the log reports the model backend, model family, backbone/encoder, encoder weights, capacity, patch settings, augmentation preset, validation setup, epochs, and batch size. The same user-readable summary is written to `run_summary.txt`, while full structured settings are saved in `config.json`.
+
 ## Outputs
 
 Each run folder can contain:
 
 - `best_model.pt`
 - `config.json`
+- `run_summary.txt`
 - `summary.json`
 - `history.csv`
 - `validation.json`
